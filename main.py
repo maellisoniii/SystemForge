@@ -20,18 +20,46 @@ solar = np.array([
     5, 0, 0, 0, 0, 0
 ])
 net_load = load - solar
+battery_capacity = 100
+battery_soc = 50
+
+battery_history = []
+grid_import = []
+solar_curtailed = []
+
+for i in range(24):
+    surplus = solar[i] - load[i]
+
+    if surplus > 0:
+        available_space = battery_capacity - battery_soc
+        charge = min(surplus, available_space)
+        battery_soc += charge
+        curtailed = surplus - charge
+        grid = 0
+
+    else:
+        deficit = -surplus
+        discharge = min(deficit, battery_soc)
+        battery_soc -= discharge
+        grid = deficit - discharge
+        curtailed = 0
+
+    battery_history.append(battery_soc)
+    grid_import.append(grid)
+    solar_curtailed.append(curtailed)
 plt.figure(figsize=(10,5))
 
-plt.plot(hours, net_load)
+plt.plot(hours, battery_history, linewidth=2)
 
-plt.axhline(0, linestyle="--")
-
-plt.title("Net Load")
+plt.title("Battery State of Charge")
 plt.xlabel("Hour")
-plt.ylabel("kWh")
+plt.ylabel("Battery Energy Stored (kWh)")
 
 plt.grid(True)
 
 plt.show()
+print("Maximum Load:", np.max(load))
+print("Maximum Solar:", np.max(solar))
+print("Minimum Net Load:", np.min(net_load))
+print("Maximum Net Load:", np.max(net_load))
 
-# Plot
