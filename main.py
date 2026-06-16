@@ -20,6 +20,16 @@ solar = np.array([
     5, 0, 0, 0, 0, 0
 ])
 net_load = load - solar
+hourly_price = np.array([
+    0.10, 0.10, 0.10, 0.10, 0.10, 0.10,
+    0.15, 0.15, 0.15, 0.15,
+    0.20, 0.20, 0.20, 0.20,
+    0.20,
+    0.30, 0.30, 0.30, 0.30,
+    0.40, 0.40, 0.40,
+    0.20, 0.15
+])
+
 def simulate_battery(battery_capacity):
 
     battery_soc = 0
@@ -27,6 +37,7 @@ def simulate_battery(battery_capacity):
     battery_history = []
     grid_import = []
     solar_curtailed = []
+    daily_grid_cost = 0
 
     for i in range(24):
 
@@ -56,58 +67,65 @@ def simulate_battery(battery_capacity):
 
             curtailed = 0
 
+        daily_grid_cost += grid * hourly_price[i]
+
         battery_history.append(battery_soc)
         grid_import.append(grid)
         solar_curtailed.append(curtailed)
 
     total_grid_import = sum(grid_import)
     total_solar_curtailed = sum(solar_curtailed)
+    annual_grid_cost = daily_grid_cost * 365
 
-    return total_grid_import, total_solar_curtailed
+    return total_grid_import, total_solar_curtailed, annual_grid_cost
 
 battery_sizes = [25,50,75,100,125,150,175,200]
-electricity_price = 0.15
 battery_cost_per_kwh = 300 
+battery_lifetime_years = 10 
 
 grid_results = []
 curtailment_results = []
 annual_grid_cost_results = []
+annualized_battery_cost_results = []
 battery_cost_results = []
-total_cost_results = []
+total_annual_cost_results = []
 
 for battery_capacity in battery_sizes:
-    total_grid_import, total_solar_curtailed = simulate_battery(battery_capacity)
+    total_grid_import, total_solar_curtailed, annual_grid_cost = simulate_battery(battery_capacity)
 
-    annual_grid_cost = total_grid_import * electricity_price * 365
     battery_cost = battery_capacity * battery_cost_per_kwh
-    total_cost = annual_grid_cost + battery_cost
+    annualized_battery_cost = battery_cost / battery_lifetime_years
+    total_annual_cost = annual_grid_cost + annualized_battery_cost
 
-    annual_grid_cost_results.append(total_grid_import)
+    grid_results.append(total_grid_import)
     curtailment_results.append(total_solar_curtailed)
     annual_grid_cost_results.append(annual_grid_cost)
-    battery_cost_results.append(battery_cost)
-    total_cost_results.append(total_cost)
+    annualized_battery_cost_results.append(annualized_battery_cost)
+    total_annual_cost_results.append(total_annual_cost)
+
 
     print("Battery Capacity:", battery_capacity, "kWh")
     print("Total Grid Import:", total_grid_import, "kWh")
-    print("Grid Cost: $", annual_grid_cost)
-    print("Battery Cost: $", battery_cost)
-    print("Total Cost: $", total_cost)
+    print("Solar Curtailed:", total_solar_curtailed, "kWh/day")
+    print("Annual Grid Cost: $", round(annual_grid_cost, 2))
+    print("Annualized Battery Cost: $", round(annualized_battery_cost,2))
+    print("Total Annual Cost: $", round(total_annual_cost, 2))
     print()
+
+
 plt.figure(figsize=(10, 5))
 
-plt.plot(battery_sizes, total_cost_results, marker="o", linewidth=2)
+plt.plot(battery_sizes, annual_grid_cost_results, marker="o", linewidth=2, label="Annual Grid Cost")
+plt.plot(battery_sizes, annualized_battery_cost_results, marker="o", linewidth=2, label="Annualized Battery Cost")
+plt.plot(battery_sizes, total_annual_cost_results, marker="o", linewidth=2, label="Total Annual Cost")
 
-plt.title("Battery Capacity vs Total System Cost")
+plt.title("Battery Capacity vs Annual System Cost")
 plt.xlabel("Battery Capacity (kWh)")
-plt.ylabel("Total Cost ($)")
+plt.ylabel("Annual Cost ($)")
 
+plt.legend()
 plt.grid(True)
 
 plt.show()
-
-
-
-
 
 
