@@ -62,4 +62,24 @@ print("Maximum Load:", np.max(load))
 print("Maximum Solar:", np.max(solar))
 print("Minimum Net Load:", np.min(net_load))
 print("Maximum Net Load:", np.max(net_load))
+# Engineering metrics
+total_grid_import = sum(grid_import)
+total_solar_curtailed = sum(solar_curtailed)
+max_battery_soc = max(battery_history)
+min_battery_soc = min(battery_history)
 
+print("Total Grid Import:", total_grid_import, "kWh")
+print("Total Solar Curtailed:", total_solar_curtailed, "kWh")
+print("Maximum Battery SOC:", max_battery_soc, "kWh")
+print("Minimum Battery SOC:", min_battery_soc, "kWh")
+plt.figure(figsize=(10, 5))
+
+plt.plot(hours, grid_import, linewidth=2)
+
+plt.title("Grid Import After Solar and Battery Dispatch")
+plt.xlabel("Hour")
+plt.ylabel("Grid Import (kWh)")
+
+plt.grid(True)
+
+plt.show()
