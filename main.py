@@ -20,66 +20,94 @@ solar = np.array([
     5, 0, 0, 0, 0, 0
 ])
 net_load = load - solar
-battery_capacity = 100
-battery_soc = 50
+def simulate_battery(battery_capacity):
 
-battery_history = []
-grid_import = []
-solar_curtailed = []
+    battery_soc = 0
 
-for i in range(24):
-    surplus = solar[i] - load[i]
+    battery_history = []
+    grid_import = []
+    solar_curtailed = []
 
-    if surplus > 0:
-        available_space = battery_capacity - battery_soc
-        charge = min(surplus, available_space)
-        battery_soc += charge
-        curtailed = surplus - charge
-        grid = 0
+    for i in range(24):
 
-    else:
-        deficit = -surplus
-        discharge = min(deficit, battery_soc)
-        battery_soc -= discharge
-        grid = deficit - discharge
-        curtailed = 0
+        surplus = solar[i] - load[i]
 
-    battery_history.append(battery_soc)
-    grid_import.append(grid)
-    solar_curtailed.append(curtailed)
-plt.figure(figsize=(10,5))
+        if surplus > 0:
 
-plt.plot(hours, battery_history, linewidth=2)
+            available_space = battery_capacity - battery_soc
 
-plt.title("Battery State of Charge")
-plt.xlabel("Hour")
-plt.ylabel("Battery Energy Stored (kWh)")
+            charge = min(surplus, available_space)
 
-plt.grid(True)
+            battery_soc += charge
 
-plt.show()
-print("Maximum Load:", np.max(load))
-print("Maximum Solar:", np.max(solar))
-print("Minimum Net Load:", np.min(net_load))
-print("Maximum Net Load:", np.max(net_load))
-# Engineering metrics
-total_grid_import = sum(grid_import)
-total_solar_curtailed = sum(solar_curtailed)
-max_battery_soc = max(battery_history)
-min_battery_soc = min(battery_history)
+            curtailed = surplus - charge
 
-print("Total Grid Import:", total_grid_import, "kWh")
-print("Total Solar Curtailed:", total_solar_curtailed, "kWh")
-print("Maximum Battery SOC:", max_battery_soc, "kWh")
-print("Minimum Battery SOC:", min_battery_soc, "kWh")
+            grid = 0
+
+        else:
+
+            deficit = -surplus
+
+            discharge = min(deficit, battery_soc)
+
+            battery_soc -= discharge
+
+            grid = deficit - discharge
+
+            curtailed = 0
+
+        battery_history.append(battery_soc)
+        grid_import.append(grid)
+        solar_curtailed.append(curtailed)
+
+    total_grid_import = sum(grid_import)
+    total_solar_curtailed = sum(solar_curtailed)
+
+    return total_grid_import, total_solar_curtailed
+
+battery_sizes = [25,50,75,100,125,150,175,200]
+electricity_price = 0.15
+battery_cost_per_kwh = 300 
+
+grid_results = []
+curtailment_results = []
+annual_grid_cost_results = []
+battery_cost_results = []
+total_cost_results = []
+
+for battery_capacity in battery_sizes:
+    total_grid_import, total_solar_curtailed = simulate_battery(battery_capacity)
+
+    annual_grid_cost = total_grid_import * electricity_price * 365
+    battery_cost = battery_capacity * battery_cost_per_kwh
+    total_cost = annual_grid_cost + battery_cost
+
+    annual_grid_cost_results.append(total_grid_import)
+    curtailment_results.append(total_solar_curtailed)
+    annual_grid_cost_results.append(annual_grid_cost)
+    battery_cost_results.append(battery_cost)
+    total_cost_results.append(total_cost)
+
+    print("Battery Capacity:", battery_capacity, "kWh")
+    print("Total Grid Import:", total_grid_import, "kWh")
+    print("Grid Cost: $", annual_grid_cost)
+    print("Battery Cost: $", battery_cost)
+    print("Total Cost: $", total_cost)
+    print()
 plt.figure(figsize=(10, 5))
 
-plt.plot(hours, grid_import, linewidth=2)
+plt.plot(battery_sizes, total_cost_results, marker="o", linewidth=2)
 
-plt.title("Grid Import After Solar and Battery Dispatch")
-plt.xlabel("Hour")
-plt.ylabel("Grid Import (kWh)")
+plt.title("Battery Capacity vs Total System Cost")
+plt.xlabel("Battery Capacity (kWh)")
+plt.ylabel("Total Cost ($)")
 
 plt.grid(True)
 
 plt.show()
+
+
+
+
+
+
