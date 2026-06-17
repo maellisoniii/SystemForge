@@ -38,6 +38,9 @@ def simulate_battery(battery_capacity):
     grid_import = []
     solar_curtailed = []
     daily_grid_cost = 0
+    daily_cost_without_battery = 0
+
+    high_price_threshold = 0.30
 
     for i in range(24):
 
@@ -58,8 +61,11 @@ def simulate_battery(battery_capacity):
         else:
 
             deficit = -surplus
-
-            discharge = min(deficit, battery_soc)
+            daily_cost_without_battery += deficit * hourly_price[i]
+            if hourly_price[i] >= high_price_threshold:
+                discharge = min(deficit, battery_soc)
+            else: 
+                discharge = 0
 
             battery_soc -= discharge
 
@@ -76,8 +82,9 @@ def simulate_battery(battery_capacity):
     total_grid_import = sum(grid_import)
     total_solar_curtailed = sum(solar_curtailed)
     annual_grid_cost = daily_grid_cost * 365
+    annual_savings = (daily_cost_without_battery - daily_grid_cost) * 365
 
-    return total_grid_import, total_solar_curtailed, annual_grid_cost
+    return total_grid_import, total_solar_curtailed, annual_grid_cost, annual_savings
 
 battery_sizes = [25,50,75,100,125,150,175,200]
 battery_cost_per_kwh = 300 
@@ -91,12 +98,12 @@ battery_cost_results = []
 total_annual_cost_results = []
 
 for battery_capacity in battery_sizes:
-    total_grid_import, total_solar_curtailed, annual_grid_cost = simulate_battery(battery_capacity)
+    total_grid_import, total_solar_curtailed, annual_grid_cost, annual_savings = simulate_battery(battery_capacity)
 
     battery_cost = battery_capacity * battery_cost_per_kwh
     annualized_battery_cost = battery_cost / battery_lifetime_years
     total_annual_cost = annual_grid_cost + annualized_battery_cost
-
+   
     grid_results.append(total_grid_import)
     curtailment_results.append(total_solar_curtailed)
     annual_grid_cost_results.append(annual_grid_cost)
@@ -110,6 +117,7 @@ for battery_capacity in battery_sizes:
     print("Annual Grid Cost: $", round(annual_grid_cost, 2))
     print("Annualized Battery Cost: $", round(annualized_battery_cost,2))
     print("Total Annual Cost: $", round(total_annual_cost, 2))
+    print("Annual Battery Savings", round(annual_savings, 2))
     print()
 
 
