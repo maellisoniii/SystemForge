@@ -33,6 +33,7 @@ hourly_price = np.array([
 def simulate_battery(battery_capacity):
 
     battery_soc = 0
+    max_soc = 0
 
     battery_history = []
     grid_import = []
@@ -72,7 +73,8 @@ def simulate_battery(battery_capacity):
             grid = deficit - discharge
 
             curtailed = 0
-
+        
+        max_soc = max(max_soc, battery_soc)
         daily_grid_cost += grid * hourly_price[i]
 
         battery_history.append(battery_soc)
@@ -83,10 +85,10 @@ def simulate_battery(battery_capacity):
     total_solar_curtailed = sum(solar_curtailed)
     annual_grid_cost = daily_grid_cost * 365
     annual_savings = (daily_cost_without_battery - daily_grid_cost) * 365
+    
+    return total_grid_import, total_solar_curtailed, annual_grid_cost, annual_savings, max_soc
 
-    return total_grid_import, total_solar_curtailed, annual_grid_cost, annual_savings
-
-battery_sizes = [25,50,75,100,125,150,175,200]
+battery_sizes = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50]
 battery_cost_per_kwh = 300 
 battery_lifetime_years = 10 
 
@@ -96,9 +98,10 @@ annual_grid_cost_results = []
 annualized_battery_cost_results = []
 battery_cost_results = []
 total_annual_cost_results = []
+annual_saving_results = []
 
 for battery_capacity in battery_sizes:
-    total_grid_import, total_solar_curtailed, annual_grid_cost, annual_savings = simulate_battery(battery_capacity)
+    total_grid_import, total_solar_curtailed, annual_grid_cost, annual_savings, max_soc = simulate_battery(battery_capacity)
 
     battery_cost = battery_capacity * battery_cost_per_kwh
     annualized_battery_cost = battery_cost / battery_lifetime_years
@@ -109,7 +112,7 @@ for battery_capacity in battery_sizes:
     annual_grid_cost_results.append(annual_grid_cost)
     annualized_battery_cost_results.append(annualized_battery_cost)
     total_annual_cost_results.append(total_annual_cost)
-
+    annual_saving_results.append(annual_savings)
 
     print("Battery Capacity:", battery_capacity, "kWh")
     print("Total Grid Import:", total_grid_import, "kWh")
@@ -118,8 +121,13 @@ for battery_capacity in battery_sizes:
     print("Annualized Battery Cost: $", round(annualized_battery_cost,2))
     print("Total Annual Cost: $", round(total_annual_cost, 2))
     print("Annual Battery Savings", round(annual_savings, 2))
+    print("Battery:", battery_capacity,"Curtailment:", total_solar_curtailed)
+    print("Battery:", battery_capacity, "Max SOC:", round(max_soc, 2))
+
     print()
 
+marginal_savings = np.diff(annual_saving_results)
+print(marginal_savings)
 
 plt.figure(figsize=(10, 5))
 
@@ -136,4 +144,25 @@ plt.grid(True)
 
 plt.show()
 
+plt.figure(figsize=(10, 5))
+
+plt.plot(battery_sizes, annual_saving_results, marker="o", linewidth=2)
+
+plt.title("Battery Capacity vs Annual Savings")
+plt.xlabel("Battery Capacity (kWh)")
+plt.ylabel("Annual Battery Savings ($)")
+
+plt.grid(True)
+plt.show()
+
+plt.figure(figsize=(10, 5))
+
+plt.plot(battery_sizes[1:], marginal_savings, marker="o", linewidth=2)
+
+plt.title("Marginal Savings from Additional Battery Capacity")
+plt.xlabel("Battery Capacity (kWh)")
+plt.ylabel("Additional Annual Savings ($)")
+
+plt.grid(True)
+plt.show()
 
