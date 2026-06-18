@@ -153,6 +153,50 @@ print("Annual Battery Savings: $", round(best_design["annual_savings"], 2))
 print("Max Battery SOC:", round(best_design["max_soc"], 2), "kWh")
 print("Solar Curtailed:", round(best_design["solar_curtailed"], 2), "kWh/day")
 
+# ============================
+# 2D DESIGN MAP 
+# ============================
+
+cost_map = np.zeros((len(solar_multipliers), len(battery_sizes)))
+
+for i, solar_multiplier in enumerate(solar_multipliers): 
+    for j, battery_capacity in enumerate(battery_sizes): 
+
+        total_grid_import, total_solar_curtailed, annual_grid_cost, annual_savings, max_soc = simulate_system(
+            battery_capacity, 
+            solar_multiplier)
+
+        battery_cost = battery_capacity * battery_cost_per_kwh
+        annualized_battery_cost = battery_cost / battery_lifetime_years
+
+        solar_cost = solar_multiplier * solar_cost_per_multiplier
+        annualized_solar_cost = solar_cost / solar_lifetime_years
+
+        total_annual_cost = (annual_grid_cost + annualized_battery_cost + 
+                             annualized_solar_cost)
+        cost_map[i, j] = total_annual_cost
+
+plt.figure(figsize=(10, 6))
+
+plt.imshow(cost_map, aspect="auto", origin="lower")
+
+plt.colorbar(label="Total Annual Cost ($)")
+
+plt.xticks(
+    ticks=np.arange(len(battery_sizes)),
+    labels=battery_sizes
+)
+
+plt.yticks(
+    ticks=np.arange(len(solar_multipliers)),
+    labels=solar_multipliers
+)
+
+plt.title("Solar + Battery Design Cost Map")
+plt.xlabel("Battery Capacity (kWh)")
+plt.ylabel("Solar Multiplier")
+
+plt.show()
 
 # ============================
 # SENSITIVITY ANALYSIS
