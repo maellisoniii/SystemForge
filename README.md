@@ -114,7 +114,8 @@ Battery Economics
 Market-based Battery Operation
 ----
 
-
+## Stage 3 
+Introduced determinisitic linear-programming battery dispatch. Monte carlo simulatons remain rule-based and will be upgraded next stage. 
 ## Software Tools 
 - Python
 - Numpy
