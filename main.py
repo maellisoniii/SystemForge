@@ -1,8 +1,9 @@
 from pathlib import Path
-
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+from scipy.optimize import linprog
+from scipy.sparse import csr_matrix, diags, eye, hstack, vstack
 
 
 # ===========================
@@ -16,6 +17,7 @@ df = pd.read_csv(data_path)
 # result by 365 would otherwise overstate annual costs and savings.
 analysis_year = 2017
 system_scale = 1e-5  # Model a small representative share of the German data.
+battery_power_ratio = 0.25  # A full battery can charge or discharge in one hour.
 df["utc_timestamp"] = pd.to_datetime(df["utc_timestamp"], utc=True)
 df = df.loc[df["utc_timestamp"].dt.year == analysis_year].copy()
 
@@ -71,95 +73,229 @@ hourly_price = prices
 # SYSTEM SIMULATION
 # ============================
 
+simulation_cache = {}
+
+
+def optimize_battery_dispatch(battery_capacity, scaled_solar):
+    """Solve the hourly battery schedule that minimizes annual grid cost.
+
+    The optimizer has perfect knowledge of the year's price, load, and solar
+    profile. It chooses grid import, charging, discharging, curtailment, and
+    state of charge subject to energy-balance, capacity, and power constraints.
+    """
+    number_of_hours = len(load)
+    net_load = load - scaled_solar
+
+    if battery_capacity == 0:
+        return (
+            np.maximum(net_load, 0),
+            np.maximum(-net_load, 0),
+            np.zeros(number_of_hours + 1),
+        )
+
+    identity = eye(number_of_hours, format="csr")
+    zero_soc = csr_matrix((number_of_hours, number_of_hours + 1))
+    zero_hourly = csr_matrix((number_of_hours, number_of_hours))
+    state_of_charge_change = diags(
+        [-np.ones(number_of_hours), np.ones(number_of_hours)],
+        [0, 1],
+        shape=(number_of_hours, number_of_hours + 1),
+        format="csr",
+    )
+
+    # Variable order: grid import, charge, discharge, curtailment, state of charge.
+    energy_balance = hstack(
+        [identity, -identity, identity, -identity, zero_soc],
+        format="csr",
+    )
+    battery_balance = hstack(
+        [
+            zero_hourly,
+            -identity,
+            identity,
+            zero_hourly,
+            state_of_charge_change,
+        ],
+        format="csr",
+    )
+    equality_constraints = vstack([energy_balance, battery_balance], format="csr")
+    equality_values = np.concatenate([net_load, np.zeros(number_of_hours)])
+
+    number_of_variables = 5 * number_of_hours + 1
+    grid_start = 0
+    charge_start = number_of_hours
+    discharge_start = 2 * number_of_hours
+    curtailment_start = 3 * number_of_hours
+    soc_start = 4 * number_of_hours
+
+    objective = np.zeros(number_of_variables)
+    objective[grid_start:charge_start] = hourly_price
+    # A tiny throughput penalty removes unnecessary charge/discharge cycles.
+    objective[charge_start:discharge_start] = 1e-9
+    objective[discharge_start:curtailment_start] = 1e-9
+
+    lower_bounds = np.zeros(number_of_variables)
+    upper_bounds = np.full(number_of_variables, np.inf)
+    max_power = battery_capacity * battery_power_ratio
+    upper_bounds[charge_start:discharge_start] = max_power
+    upper_bounds[discharge_start:curtailment_start] = max_power
+    upper_bounds[curtailment_start:soc_start] = scaled_solar
+    upper_bounds[soc_start:] = battery_capacity
+
+    # Start and end the year empty so the optimizer cannot borrow energy from
+    # outside the analysis period or leave a free stored-energy benefit behind.
+    upper_bounds[soc_start] = 0
+    upper_bounds[-1] = 0
+
+    solution = linprog(
+        objective,
+        A_eq=equality_constraints,
+        b_eq=equality_values,
+        bounds=list(zip(lower_bounds, upper_bounds)),
+        method="highs",
+    )
+
+    if not solution.success:
+        raise RuntimeError(f"Battery dispatch optimization failed: {solution.message}")
+
+    return (
+        solution.x[grid_start:charge_start],
+        solution.x[curtailment_start:soc_start],
+        solution.x[soc_start:],
+    )
+
+
 def simulate_system(battery_capacity, solar_multiplier, return_hourly_data=False):
     scaled_solar = solar * solar_multiplier
-
-    battery_soc = 0
-    max_soc = 0
-
-    grid_import = []
-    solar_curtailed = []
-
-    grid_cost = 0
-    cost_without_battery = 0
-
-    # Charge from the grid during the cheapest 25% of hours and discharge
-    # during the most expensive 25% of hours.
-    charging_threshold = np.quantile(hourly_price, 0.25)
-    high_price_threshold = np.quantile(hourly_price, 0.75)
 
     if (len(load) != len(scaled_solar)
             or len(load) != len(hourly_price)):
         raise ValueError("load, solar, and price arrays must have identical lengths")
 
-    for i in range(len(load)):
-        surplus = scaled_solar[i] - load[i]
+    cache_key = (battery_capacity, solar_multiplier)
 
-        if surplus > 0:
-            available_space = battery_capacity - battery_soc
-            charge = min(surplus, available_space)
+    if not return_hourly_data and cache_key in simulation_cache:
+        return simulation_cache[cache_key]
 
-            battery_soc += charge
-            curtailed = surplus - charge
-            grid = 0
-
-        else:
-            deficit = -surplus
-            cost_without_battery += deficit * hourly_price[i]
-
-            if hourly_price[i] >= high_price_threshold:
-                discharge = min(deficit, battery_soc)
-            else:
-                discharge = 0
-
-            battery_soc -= discharge
-            grid = deficit - discharge
-            curtailed = 0
-
-        # When electricity is cheap, fill any remaining battery capacity from
-        # the grid. This grid energy is included in both import and cost.
-        if hourly_price[i] < charging_threshold:
-            available_space = battery_capacity - battery_soc
-            grid_charge = max(available_space, 0)
-
-            battery_soc += grid_charge
-            grid += grid_charge
-
-        max_soc = max(max_soc, battery_soc)
-        grid_cost += grid * hourly_price[i]
-
-        grid_import.append(grid)
-        solar_curtailed.append(curtailed)
-
-    total_grid_import = sum(grid_import)
-    total_solar_curtailed = sum(solar_curtailed)
-
-    # The simulation covers a full year, so no additional multiplier is needed.
-    annual_grid_cost = grid_cost
-    annual_savings = cost_without_battery - grid_cost
-
-    results = (
-        total_grid_import,
-        total_solar_curtailed,
-        annual_grid_cost,
-        annual_savings,
-        max_soc,
+    grid_import, solar_curtailed, battery_soc = optimize_battery_dispatch(
+        battery_capacity,
+        scaled_solar,
+    )
+    grid_cost = np.dot(grid_import, hourly_price)
+    cost_without_battery = np.dot(
+        np.maximum(load - scaled_solar, 0),
+        hourly_price,
     )
 
-    if return_hourly_data:
-        return results + (
-            np.array(grid_import),
-            np.array(solar_curtailed),
-        )
+    results = (
+        np.sum(grid_import),
+        np.sum(solar_curtailed),
+        grid_cost,
+        cost_without_battery - grid_cost,
+        np.max(battery_soc),
+    )
 
-    return results
+    if not return_hourly_data:
+        simulation_cache[cache_key] = results
+        return results
+
+    return results + (grid_import, solar_curtailed)
+
+
+def run_monte_carlo(
+        battery_capacity,
+        solar_multiplier,
+        num_scenarios=1000,
+        solar_variability=0.15,
+        load_variability=0.08,
+        price_variability=0.25,
+        price_shift_variability=0.01,
+        random_seed=42):
+    """Return annual cost outcomes for randomized solar, load, and price scenarios.
+
+    Each scenario keeps the recorded hourly profile, while varying annual solar
+    yield, load level, and price level. Price shifts are in EUR/kWh.
+    """
+    rng = np.random.default_rng(random_seed)
+
+    solar_scale = rng.lognormal(
+        mean=-0.5 * solar_variability ** 2,
+        sigma=solar_variability,
+        size=num_scenarios,
+    )
+    load_scale = np.clip(
+        rng.normal(1, load_variability, size=num_scenarios),
+        0.1,
+        None,
+    )
+    price_scale = rng.lognormal(
+        mean=-0.5 * price_variability ** 2,
+        sigma=price_variability,
+        size=num_scenarios,
+    )
+    price_shift = rng.normal(0, price_shift_variability, size=num_scenarios)
+
+    charging_threshold = np.quantile(hourly_price, 0.25) * price_scale + price_shift
+    discharging_threshold = np.quantile(hourly_price, 0.75) * price_scale + price_shift
+
+    battery_soc = np.zeros(num_scenarios)
+    grid_cost = np.zeros(num_scenarios)
+
+    for i in range(len(load)):
+        scenario_solar = solar[i] * solar_multiplier * solar_scale
+        scenario_load = load[i] * load_scale
+        scenario_price = hourly_price[i] * price_scale + price_shift
+        surplus = scenario_solar - scenario_load
+
+        surplus_mask = surplus > 0
+        charge = np.minimum(
+            np.maximum(surplus, 0),
+            battery_capacity - battery_soc,
+        )
+        battery_soc += charge
+
+        deficit = np.maximum(-surplus, 0)
+        discharge = np.where(
+            scenario_price >= discharging_threshold,
+            np.minimum(deficit, battery_soc),
+            0,
+        )
+        battery_soc -= discharge
+        grid = deficit - discharge
+
+        grid_charge = np.where(
+            scenario_price < charging_threshold,
+            np.maximum(battery_capacity - battery_soc, 0),
+            0,
+        )
+        battery_soc += grid_charge
+        grid += grid_charge
+
+        grid_cost += grid * scenario_price
+
+    annualized_battery_cost = (
+        battery_capacity * battery_cost_per_kwh / battery_lifetime_years
+    )
+    annualized_solar_cost = (
+        solar_multiplier * solar_cost_per_multiplier / solar_lifetime_years
+    )
+    total_annual_cost = grid_cost + annualized_battery_cost + annualized_solar_cost
+
+    return total_annual_cost, grid_cost
+
+
+def calculate_cost_risk_metrics(costs, confidence_level=0.95):
+    """Return Value at Risk and Conditional Value at Risk for annual costs."""
+    value_at_risk = np.percentile(costs, confidence_level * 100)
+    conditional_value_at_risk = np.mean(costs[costs >= value_at_risk])
+    return value_at_risk, conditional_value_at_risk
 
 
 # ============================
 # DESIGN OPTIMIZATION
 # ============================
 
-battery_sizes = [0, 10, 20, 30, 40, 50, 75, 100]
+battery_sizes = [0, 50, 100, 250, 500, 1000]
 solar_multipliers = [0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 3.0]
 
 battery_cost_per_kwh = 300
@@ -217,6 +353,341 @@ print("Annualized Solar Cost: EUR", round(best_design["annualized_solar_cost"], 
 print("Annual Battery Savings: EUR", round(best_design["annual_savings"], 2))
 print("Max Battery SOC:", round(best_design["max_soc"], 2), "kWh")
 print("Solar Curtailed:", round(best_design["solar_curtailed"], 2), "kWh")
+
+
+# ============================
+# MONTE CARLO SCENARIO ANALYSIS
+# ============================
+
+num_monte_carlo_scenarios = 1000
+monte_carlo_battery_capacity = best_design["battery_capacity"]
+monte_carlo_solar_multiplier = best_design["solar_multiplier"]
+solar_variability = 0.15
+load_variability = 0.08
+price_variability = 0.25
+price_shift_variability = 0.01
+monte_carlo_seed = 42
+
+scenario_total_costs, scenario_grid_costs = run_monte_carlo(
+    monte_carlo_battery_capacity,
+    monte_carlo_solar_multiplier,
+    num_scenarios=num_monte_carlo_scenarios,
+    solar_variability=solar_variability,
+    load_variability=load_variability,
+    price_variability=price_variability,
+    price_shift_variability=price_shift_variability,
+    random_seed=monte_carlo_seed,
+)
+
+expected_cost = np.mean(scenario_total_costs)
+worst_case_cost = np.max(scenario_total_costs)
+scenario_cost_interval = np.percentile(scenario_total_costs, [2.5, 97.5])
+value_at_risk, conditional_value_at_risk = calculate_cost_risk_metrics(
+    scenario_total_costs
+)
+cost_standard_deviation = np.std(scenario_total_costs, ddof=1)
+print("Annual Cost Standard Deviation: EUR", round(cost_standard_deviation, 2))
+standard_error = np.std(scenario_total_costs, ddof=1) / np.sqrt(num_monte_carlo_scenarios)
+expected_cost_confidence_interval = (
+    expected_cost - 1.96 * standard_error,
+    expected_cost + 1.96 * standard_error,
+)
+
+print("\nMonte Carlo Cost Analysis")
+print("-------------------------")
+print("Scenarios:", num_monte_carlo_scenarios)
+print("Battery Capacity:", monte_carlo_battery_capacity, "kWh")
+print("Solar Multiplier:", monte_carlo_solar_multiplier)
+print("Expected Annual Cost: EUR", round(expected_cost, 2))
+print("Worst-Case Annual Cost: EUR", round(worst_case_cost, 2))
+print("95% Value at Risk: EUR", round(value_at_risk, 2))
+print("95% Conditional Value at Risk: EUR", round(conditional_value_at_risk, 2))
+print(
+    "95% Scenario Cost Interval: EUR",
+    round(scenario_cost_interval[0], 2),
+    "to EUR",
+    round(scenario_cost_interval[1], 2),
+)
+print(
+    "95% Confidence Interval for Expected Cost: EUR",
+    round(expected_cost_confidence_interval[0], 2),
+    "to EUR",
+    round(expected_cost_confidence_interval[1], 2),
+)
+
+
+# ============================
+# UNCERTAINTY SOURCE EXPERIMENTS
+# ============================
+
+uncertainty_experiments = [
+    (
+        "Solar yield",
+        f"Solar variation: {solar_variability:.0%}",
+        {
+            "solar_variability": solar_variability,
+            "load_variability": 0,
+            "price_variability": 0,
+            "price_shift_variability": 0,
+        },
+    ),
+    (
+        "Load level",
+        f"Load variation: {load_variability:.0%}",
+        {
+            "solar_variability": 0,
+            "load_variability": load_variability,
+            "price_variability": 0,
+            "price_shift_variability": 0,
+        },
+    ),
+    (
+        "Price level and shift",
+        (
+            f"Price scale: {price_variability:.0%}, "
+            f"price shift: {price_shift_variability:.3f} EUR/kWh"
+        ),
+        {
+            "solar_variability": 0,
+            "load_variability": 0,
+            "price_variability": price_variability,
+            "price_shift_variability": price_shift_variability,
+        },
+    ),
+]
+
+uncertainty_results = []
+
+for uncertainty_source, scenario_setting, scenario_parameters in uncertainty_experiments:
+    experiment_costs, _ = run_monte_carlo(
+        monte_carlo_battery_capacity,
+        monte_carlo_solar_multiplier,
+        num_scenarios=num_monte_carlo_scenarios,
+        random_seed=monte_carlo_seed,
+        **scenario_parameters,
+    )
+
+    uncertainty_results.append({
+        "Uncertainty Source": uncertainty_source,
+        "Scenario Setting": scenario_setting,
+        "Cost Standard Deviation (EUR)": np.std(experiment_costs, ddof=1),
+    })
+
+uncertainty_table = pd.DataFrame(uncertainty_results)
+
+print("\nUncertainty Source Comparison")
+print("-----------------------------")
+print(
+    uncertainty_table.to_string(
+        index=False,
+        formatters={
+            "Cost Standard Deviation (EUR)": "{:,.2f}".format,
+        },
+    )
+)
+
+table_for_display = uncertainty_table.copy()
+table_for_display["Cost Standard Deviation (EUR)"] = (
+    table_for_display["Cost Standard Deviation (EUR)"]
+    .map(lambda value: f"EUR {value:,.2f}")
+)
+
+figure, axis = plt.subplots(figsize=(11, 2.5))
+axis.axis("off")
+axis.set_title("Monte Carlo Uncertainty Source Comparison", fontsize=14, pad=14)
+
+comparison_table = axis.table(
+    cellText=table_for_display.values,
+    colLabels=table_for_display.columns,
+    cellLoc="center",
+    colLoc="center",
+    loc="center",
+)
+comparison_table.auto_set_font_size(False)
+comparison_table.set_fontsize(10)
+comparison_table.scale(1, 1.7)
+
+for column_index in range(len(table_for_display.columns)):
+    comparison_table[(0, column_index)].set_facecolor("steelblue")
+    comparison_table[(0, column_index)].set_text_props(color="white", weight="bold")
+
+plt.show()
+
+
+# ============================
+# DESIGN UNCERTAINTY COMPARISON
+# ============================
+
+# This analysis uses a representative design grid. Expand these lists to the
+# full battery_sizes and solar_multipliers lists for a slower full sweep.
+design_comparison_scenarios = 100
+design_comparison_battery_sizes = [0, 20, 50, 100]
+design_comparison_solar_multipliers = [0.5, 1.0, 2.0, 3.0]
+design_uncertainty_results = []
+design_uncertainty_maps = {
+    uncertainty_source: np.zeros((
+        len(design_comparison_solar_multipliers),
+        len(design_comparison_battery_sizes),
+    ))
+    for uncertainty_source, _, _ in uncertainty_experiments
+}
+
+for solar_index, design_solar_multiplier in enumerate(design_comparison_solar_multipliers):
+    for battery_index, design_battery_capacity in enumerate(design_comparison_battery_sizes):
+        design_result = {
+            "Solar Multiplier": design_solar_multiplier,
+            "Battery Capacity (kWh)": design_battery_capacity,
+        }
+
+        for uncertainty_source, _, scenario_parameters in uncertainty_experiments:
+            experiment_costs, _ = run_monte_carlo(
+                design_battery_capacity,
+                design_solar_multiplier,
+                num_scenarios=design_comparison_scenarios,
+                random_seed=monte_carlo_seed,
+                **scenario_parameters,
+            )
+
+            cost_standard_deviation = np.std(experiment_costs, ddof=1)
+            column_name = f"{uncertainty_source} Cost Std Dev (EUR)"
+            design_result[column_name] = cost_standard_deviation
+            design_uncertainty_maps[uncertainty_source][solar_index, battery_index] = (
+                cost_standard_deviation
+            )
+
+        combined_scenario_costs, _ = run_monte_carlo(
+            design_battery_capacity,
+            design_solar_multiplier,
+            num_scenarios=design_comparison_scenarios,
+            solar_variability=solar_variability,
+            load_variability=load_variability,
+            price_variability=price_variability,
+            price_shift_variability=price_shift_variability,
+            random_seed=monte_carlo_seed,
+        )
+        design_value_at_risk, design_conditional_value_at_risk = (
+            calculate_cost_risk_metrics(combined_scenario_costs)
+        )
+        design_expected_cost = np.mean(combined_scenario_costs)
+
+        design_result["Expected Cost (EUR)"] = design_expected_cost
+        design_result["All Sources Cost Std Dev (EUR)"] = np.std(
+            combined_scenario_costs,
+            ddof=1,
+        )
+        design_result["95% Value at Risk (EUR)"] = design_value_at_risk
+        design_result["95% CVaR (EUR)"] = design_conditional_value_at_risk
+        design_result["95% CVaR Tail Premium (EUR)"] = (
+            design_conditional_value_at_risk - design_expected_cost
+        )
+
+        design_uncertainty_results.append(design_result)
+
+design_uncertainty_table = pd.DataFrame(design_uncertainty_results)
+
+print("\nDesign Uncertainty Comparison")
+print("-----------------------------")
+print(
+    design_uncertainty_table.to_string(
+        index=False,
+        formatters={
+            column: "{:,.2f}".format
+            for column in design_uncertainty_table.columns
+            if "(EUR)" in column
+        },
+    )
+)
+
+figure, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
+
+for axis, (uncertainty_source, cost_standard_deviation_map) in zip(
+        axes,
+        design_uncertainty_maps.items()):
+    image = axis.imshow(cost_standard_deviation_map, aspect="auto", origin="lower")
+    axis.set_title(f"Cost Risk from {uncertainty_source}")
+    axis.set_xlabel("Battery Capacity (kWh)")
+    axis.set_ylabel("Solar Multiplier")
+    axis.set_xticks(
+        np.arange(len(design_comparison_battery_sizes)),
+        design_comparison_battery_sizes,
+    )
+    axis.set_yticks(
+        np.arange(len(design_comparison_solar_multipliers)),
+        design_comparison_solar_multipliers,
+    )
+    figure.colorbar(image, ax=axis, label="Cost Std Dev (EUR)")
+
+plt.show()
+
+
+figure, risk_axes = plt.subplots(1, 2, figsize=(16, 6), constrained_layout=True)
+marker_sizes = 60 + design_uncertainty_table["Battery Capacity (kWh)"] * 1.5
+
+standard_deviation_plot = risk_axes[0].scatter(
+    design_uncertainty_table["All Sources Cost Std Dev (EUR)"],
+    design_uncertainty_table["Expected Cost (EUR)"],
+    c=design_uncertainty_table["Solar Multiplier"],
+    s=marker_sizes,
+    cmap="viridis",
+    alpha=0.8,
+)
+risk_axes[0].set_title("Expected Cost vs Standard-Deviation Risk")
+risk_axes[0].set_xlabel("Annual Cost Standard Deviation (EUR)")
+risk_axes[0].set_ylabel("Expected Annual Cost (EUR)")
+risk_axes[0].grid(True)
+
+cvar_plot = risk_axes[1].scatter(
+    design_uncertainty_table["95% CVaR Tail Premium (EUR)"],
+    design_uncertainty_table["Expected Cost (EUR)"],
+    c=design_uncertainty_table["Solar Multiplier"],
+    s=marker_sizes,
+    cmap="viridis",
+    alpha=0.8,
+)
+risk_axes[1].set_title("Expected Cost vs 95% CVaR Tail Risk")
+risk_axes[1].set_xlabel("95% CVaR Tail Premium (EUR)")
+risk_axes[1].set_ylabel("Expected Annual Cost (EUR)")
+risk_axes[1].grid(True)
+
+for _, design in design_uncertainty_table.iterrows():
+    label = f"S{design['Solar Multiplier']} / B{design['Battery Capacity (kWh)']:.0f}"
+    risk_axes[0].annotate(
+        label,
+        (
+            design["All Sources Cost Std Dev (EUR)"],
+            design["Expected Cost (EUR)"],
+        ),
+        fontsize=7,
+    )
+    risk_axes[1].annotate(
+        label,
+        (
+            design["95% CVaR Tail Premium (EUR)"],
+            design["Expected Cost (EUR)"],
+        ),
+        fontsize=7,
+    )
+
+figure.colorbar(cvar_plot, ax=risk_axes, label="Solar Multiplier")
+plt.show()
+
+
+plt.figure(figsize=(10, 5))
+plt.hist(scenario_total_costs, bins=40, color="steelblue", edgecolor="white")
+plt.axvline(expected_cost, color="black", linewidth=2, label="Expected cost")
+plt.axvline(
+    scenario_cost_interval[0],
+    color="orange",
+    linestyle="--",
+    label="95% interval",
+)
+plt.axvline(scenario_cost_interval[1], color="orange", linestyle="--")
+plt.title("Monte Carlo Distribution of Annual System Cost")
+plt.xlabel("Annual Cost (EUR)")
+plt.ylabel("Number of Scenarios")
+plt.legend()
+plt.grid(axis="y")
+plt.show()
 
 
 # ============================
