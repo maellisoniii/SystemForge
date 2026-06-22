@@ -47,6 +47,22 @@ prices = (
 # `prices` is already a NumPy array, so it does not have a "price" column.
 hourly_price = prices
 
+# Design metrics based on annual energy and average hourly demand.
+annual_load = np.sum(load)
+reference_annual_solar = np.sum(solar)
+average_load = np.mean(load)
+reference_solar_penetration = reference_annual_solar / annual_load
+
+
+def solar_scale_from_penetration(solar_penetration):
+    """Scale the recorded solar profile to the requested annual penetration."""
+    return solar_penetration / reference_solar_penetration
+
+
+def battery_capacity_from_duration(storage_duration_hours):
+    """Convert storage duration to capacity using average hourly load."""
+    return storage_duration_hours * average_load
+
 
 # ============================
 # INPUT DATA
@@ -165,14 +181,15 @@ def optimize_battery_dispatch(battery_capacity, scaled_solar):
     )
 
 
-def simulate_system(battery_capacity, solar_multiplier, return_hourly_data=False):
-    scaled_solar = solar * solar_multiplier
+def simulate_system(storage_duration_hours, solar_penetration, return_hourly_data=False):
+    battery_capacity = battery_capacity_from_duration(storage_duration_hours)
+    scaled_solar = solar * solar_scale_from_penetration(solar_penetration)
 
     if (len(load) != len(scaled_solar)
             or len(load) != len(hourly_price)):
         raise ValueError("load, solar, and price arrays must have identical lengths")
 
-    cache_key = (battery_capacity, solar_multiplier)
+    cache_key = (storage_duration_hours, solar_penetration)
 
     if not return_hourly_data and cache_key in simulation_cache:
         return simulation_cache[cache_key]
@@ -203,8 +220,8 @@ def simulate_system(battery_capacity, solar_multiplier, return_hourly_data=False
 
 
 def run_monte_carlo(
-        battery_capacity,
-        solar_multiplier,
+        storage_duration_hours,
+        solar_penetration,
         num_scenarios=1000,
         solar_variability=0.15,
         load_variability=0.08,
@@ -217,6 +234,9 @@ def run_monte_carlo(
     yield, load level, and price level. Price shifts are in EUR/kWh.
     """
     rng = np.random.default_rng(random_seed)
+
+    battery_capacity = battery_capacity_from_duration(storage_duration_hours)
+    solar_profile_scale = solar_scale_from_penetration(solar_penetration)
 
     solar_scale = rng.lognormal(
         mean=-0.5 * solar_variability ** 2,
@@ -242,7 +262,7 @@ def run_monte_carlo(
     grid_cost = np.zeros(num_scenarios)
 
     for i in range(len(load)):
-        scenario_solar = solar[i] * solar_multiplier * solar_scale
+        scenario_solar = solar[i] * solar_profile_scale * solar_scale
         scenario_load = load[i] * load_scale
         scenario_price = hourly_price[i] * price_scale + price_shift
         surplus = scenario_solar - scenario_load
@@ -277,7 +297,7 @@ def run_monte_carlo(
         battery_capacity * battery_cost_per_kwh / battery_lifetime_years
     )
     annualized_solar_cost = (
-        solar_multiplier * solar_cost_per_multiplier / solar_lifetime_years
+        solar_penetration * solar_cost_per_penetration / solar_lifetime_years
     )
     total_annual_cost = grid_cost + annualized_battery_cost + annualized_solar_cost
 
@@ -295,30 +315,33 @@ def calculate_cost_risk_metrics(costs, confidence_level=0.95):
 # DESIGN OPTIMIZATION
 # ============================
 
-battery_sizes = [0, 50, 100, 250, 500, 1000]
-solar_multipliers = [0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 3.0]
+# Choose designs using energy-system metrics rather than raw asset sizes.
+storage_durations_hours = [0, 0.25, 0.5, 1.0, 2.0]
+solar_penetrations = [0.05, 0.10, 0.15, 0.20, 0.25]
 
 battery_cost_per_kwh = 300
 battery_lifetime_years = 10
 
-solar_cost_per_multiplier = 8000
+solar_cost_per_penetration = 8000 / reference_solar_penetration
 solar_lifetime_years = 20
 
 best_design = None
 best_cost = float("inf")
 
-for solar_multiplier in solar_multipliers:
-    for battery_capacity in battery_sizes:
+for solar_penetration in solar_penetrations:
+    for storage_duration in storage_durations_hours:
         (total_grid_import, total_solar_curtailed, annual_grid_cost,
          annual_savings, max_soc) = simulate_system(
-            battery_capacity,
-            solar_multiplier,
+            storage_duration,
+            solar_penetration,
         )
+
+        battery_capacity = battery_capacity_from_duration(storage_duration)
 
         battery_cost = battery_capacity * battery_cost_per_kwh
         annualized_battery_cost = battery_cost / battery_lifetime_years
 
-        solar_cost = solar_multiplier * solar_cost_per_multiplier
+        solar_cost = solar_penetration * solar_cost_per_penetration
         annualized_solar_cost = solar_cost / solar_lifetime_years
 
         total_annual_cost = (
@@ -330,7 +353,8 @@ for solar_multiplier in solar_multipliers:
         if total_annual_cost < best_cost:
             best_cost = total_annual_cost
             best_design = {
-                "solar_multiplier": solar_multiplier,
+                "solar_penetration": solar_penetration,
+                "storage_duration_hours": storage_duration,
                 "battery_capacity": battery_capacity,
                 "total_annual_cost": total_annual_cost,
                 "annual_grid_cost": annual_grid_cost,
@@ -339,13 +363,15 @@ for solar_multiplier in solar_multipliers:
                 "max_soc": max_soc,
                 "solar_curtailed": total_solar_curtailed,
                 "annual_savings": annual_savings,
+                "grid_dependence": total_grid_import / annual_load,
             }
 
 
 print(f"\nBest System Design ({analysis_year})")
 print("------------------")
-print("Solar Multiplier:", best_design["solar_multiplier"])
-print("Battery Capacity:", best_design["battery_capacity"], "kWh")
+print("Solar Penetration:", round(best_design["solar_penetration"] * 100, 1), "%")
+print("Storage Duration:", best_design["storage_duration_hours"], "hours")
+print("Battery Capacity:", round(best_design["battery_capacity"], 2), "kWh")
 print("Total Annual Cost: EUR", round(best_design["total_annual_cost"], 2))
 print("Annual Grid Cost: EUR", round(best_design["annual_grid_cost"], 2))
 print("Annualized Battery Cost: EUR", round(best_design["annualized_battery_cost"], 2))
@@ -353,6 +379,7 @@ print("Annualized Solar Cost: EUR", round(best_design["annualized_solar_cost"], 
 print("Annual Battery Savings: EUR", round(best_design["annual_savings"], 2))
 print("Max Battery SOC:", round(best_design["max_soc"], 2), "kWh")
 print("Solar Curtailed:", round(best_design["solar_curtailed"], 2), "kWh")
+print("Grid Dependence:", round(best_design["grid_dependence"] * 100, 2), "%")
 
 
 # ============================
@@ -360,8 +387,8 @@ print("Solar Curtailed:", round(best_design["solar_curtailed"], 2), "kWh")
 # ============================
 
 num_monte_carlo_scenarios = 1000
-monte_carlo_battery_capacity = best_design["battery_capacity"]
-monte_carlo_solar_multiplier = best_design["solar_multiplier"]
+monte_carlo_storage_duration = best_design["storage_duration_hours"]
+monte_carlo_solar_penetration = best_design["solar_penetration"]
 solar_variability = 0.15
 load_variability = 0.08
 price_variability = 0.25
@@ -369,8 +396,8 @@ price_shift_variability = 0.01
 monte_carlo_seed = 42
 
 scenario_total_costs, scenario_grid_costs = run_monte_carlo(
-    monte_carlo_battery_capacity,
-    monte_carlo_solar_multiplier,
+    monte_carlo_storage_duration,
+    monte_carlo_solar_penetration,
     num_scenarios=num_monte_carlo_scenarios,
     solar_variability=solar_variability,
     load_variability=load_variability,
@@ -396,8 +423,8 @@ expected_cost_confidence_interval = (
 print("\nMonte Carlo Cost Analysis")
 print("-------------------------")
 print("Scenarios:", num_monte_carlo_scenarios)
-print("Battery Capacity:", monte_carlo_battery_capacity, "kWh")
-print("Solar Multiplier:", monte_carlo_solar_multiplier)
+print("Storage Duration:", monte_carlo_storage_duration, "hours")
+print("Solar Penetration:", round(monte_carlo_solar_penetration * 100, 1), "%")
 print("Expected Annual Cost: EUR", round(expected_cost, 2))
 print("Worst-Case Annual Cost: EUR", round(worst_case_cost, 2))
 print("95% Value at Risk: EUR", round(value_at_risk, 2))
@@ -460,8 +487,8 @@ uncertainty_results = []
 
 for uncertainty_source, scenario_setting, scenario_parameters in uncertainty_experiments:
     experiment_costs, _ = run_monte_carlo(
-        monte_carlo_battery_capacity,
-        monte_carlo_solar_multiplier,
+        monte_carlo_storage_duration,
+        monte_carlo_solar_penetration,
         num_scenarios=num_monte_carlo_scenarios,
         random_seed=monte_carlo_seed,
         **scenario_parameters,
@@ -518,31 +545,53 @@ plt.show()
 # DESIGN UNCERTAINTY COMPARISON
 # ============================
 
-# This analysis uses a representative design grid. Expand these lists to the
-# full battery_sizes and solar_multipliers lists for a slower full sweep.
+# This analysis reports every design in the selected duration/penetration grid.
+# Reduce either list below when you only need a faster representative sweep.
 design_comparison_scenarios = 100
-design_comparison_battery_sizes = [0, 20, 50, 100]
-design_comparison_solar_multipliers = [0.5, 1.0, 2.0, 3.0]
+design_comparison_storage_durations = storage_durations_hours
+design_comparison_solar_penetrations = solar_penetrations
 design_uncertainty_results = []
 design_uncertainty_maps = {
     uncertainty_source: np.zeros((
-        len(design_comparison_solar_multipliers),
-        len(design_comparison_battery_sizes),
+        len(design_comparison_solar_penetrations),
+        len(design_comparison_storage_durations),
     ))
     for uncertainty_source, _, _ in uncertainty_experiments
 }
 
-for solar_index, design_solar_multiplier in enumerate(design_comparison_solar_multipliers):
-    for battery_index, design_battery_capacity in enumerate(design_comparison_battery_sizes):
+for solar_index, design_solar_penetration in enumerate(design_comparison_solar_penetrations):
+    for duration_index, design_storage_duration in enumerate(design_comparison_storage_durations):
+        design_battery_capacity = battery_capacity_from_duration(design_storage_duration)
+        (design_grid_import, design_solar_curtailed, design_grid_cost,
+         design_savings, design_max_soc) = simulate_system(
+            design_storage_duration,
+            design_solar_penetration,
+        )
+        design_scaled_solar = solar * solar_scale_from_penetration(
+            design_solar_penetration
+        )
+        design_annual_solar = np.sum(design_scaled_solar)
+        design_solar_utilization = (
+            (design_annual_solar - design_solar_curtailed) / design_annual_solar
+        )
         design_result = {
-            "Solar Multiplier": design_solar_multiplier,
+            "Solar Penetration": design_solar_penetration,
+            "Storage Duration (hours)": design_storage_duration,
             "Battery Capacity (kWh)": design_battery_capacity,
+            "Annual Cost (EUR)": (
+                design_grid_cost
+                + design_battery_capacity * battery_cost_per_kwh / battery_lifetime_years
+                + design_solar_penetration * solar_cost_per_penetration / solar_lifetime_years
+            ),
+            "Solar Curtailment (kWh)": design_solar_curtailed,
+            "Solar Utilization": design_solar_utilization,
+            "Grid Dependence": design_grid_import / annual_load,
         }
 
         for uncertainty_source, _, scenario_parameters in uncertainty_experiments:
             experiment_costs, _ = run_monte_carlo(
-                design_battery_capacity,
-                design_solar_multiplier,
+                design_storage_duration,
+                design_solar_penetration,
                 num_scenarios=design_comparison_scenarios,
                 random_seed=monte_carlo_seed,
                 **scenario_parameters,
@@ -551,13 +600,13 @@ for solar_index, design_solar_multiplier in enumerate(design_comparison_solar_mu
             cost_standard_deviation = np.std(experiment_costs, ddof=1)
             column_name = f"{uncertainty_source} Cost Std Dev (EUR)"
             design_result[column_name] = cost_standard_deviation
-            design_uncertainty_maps[uncertainty_source][solar_index, battery_index] = (
+            design_uncertainty_maps[uncertainty_source][solar_index, duration_index] = (
                 cost_standard_deviation
             )
 
         combined_scenario_costs, _ = run_monte_carlo(
-            design_battery_capacity,
-            design_solar_multiplier,
+            design_storage_duration,
+            design_solar_penetration,
             num_scenarios=design_comparison_scenarios,
             solar_variability=solar_variability,
             load_variability=load_variability,
@@ -594,6 +643,11 @@ print(
             column: "{:,.2f}".format
             for column in design_uncertainty_table.columns
             if "(EUR)" in column
+        }
+        | {
+            "Solar Penetration": "{:.1%}".format,
+            "Solar Utilization": "{:.1%}".format,
+            "Grid Dependence": "{:.1%}".format,
         },
     )
 )
@@ -605,15 +659,15 @@ for axis, (uncertainty_source, cost_standard_deviation_map) in zip(
         design_uncertainty_maps.items()):
     image = axis.imshow(cost_standard_deviation_map, aspect="auto", origin="lower")
     axis.set_title(f"Cost Risk from {uncertainty_source}")
-    axis.set_xlabel("Battery Capacity (kWh)")
-    axis.set_ylabel("Solar Multiplier")
+    axis.set_xlabel("Storage Duration (hours)")
+    axis.set_ylabel("Solar Penetration")
     axis.set_xticks(
-        np.arange(len(design_comparison_battery_sizes)),
-        design_comparison_battery_sizes,
+        np.arange(len(design_comparison_storage_durations)),
+        design_comparison_storage_durations,
     )
     axis.set_yticks(
-        np.arange(len(design_comparison_solar_multipliers)),
-        design_comparison_solar_multipliers,
+        np.arange(len(design_comparison_solar_penetrations)),
+        [f"{penetration:.0%}" for penetration in design_comparison_solar_penetrations],
     )
     figure.colorbar(image, ax=axis, label="Cost Std Dev (EUR)")
 
@@ -621,12 +675,12 @@ plt.show()
 
 
 figure, risk_axes = plt.subplots(1, 2, figsize=(16, 6), constrained_layout=True)
-marker_sizes = 60 + design_uncertainty_table["Battery Capacity (kWh)"] * 1.5
+marker_sizes = 60 + design_uncertainty_table["Storage Duration (hours)"] * 120
 
 standard_deviation_plot = risk_axes[0].scatter(
     design_uncertainty_table["All Sources Cost Std Dev (EUR)"],
     design_uncertainty_table["Expected Cost (EUR)"],
-    c=design_uncertainty_table["Solar Multiplier"],
+    c=design_uncertainty_table["Solar Penetration"],
     s=marker_sizes,
     cmap="viridis",
     alpha=0.8,
@@ -639,7 +693,7 @@ risk_axes[0].grid(True)
 cvar_plot = risk_axes[1].scatter(
     design_uncertainty_table["95% CVaR Tail Premium (EUR)"],
     design_uncertainty_table["Expected Cost (EUR)"],
-    c=design_uncertainty_table["Solar Multiplier"],
+    c=design_uncertainty_table["Solar Penetration"],
     s=marker_sizes,
     cmap="viridis",
     alpha=0.8,
@@ -650,7 +704,10 @@ risk_axes[1].set_ylabel("Expected Annual Cost (EUR)")
 risk_axes[1].grid(True)
 
 for _, design in design_uncertainty_table.iterrows():
-    label = f"S{design['Solar Multiplier']} / B{design['Battery Capacity (kWh)']:.0f}"
+    label = (
+        f"S{design['Solar Penetration']:.0%} / "
+        f"D{design['Storage Duration (hours)']:.2g}h"
+    )
     risk_axes[0].annotate(
         label,
         (
@@ -668,7 +725,7 @@ for _, design in design_uncertainty_table.iterrows():
         fontsize=7,
     )
 
-figure.colorbar(cvar_plot, ax=risk_axes, label="Solar Multiplier")
+figure.colorbar(cvar_plot, ax=risk_axes, label="Solar Penetration")
 plt.show()
 
 
@@ -697,15 +754,18 @@ plt.show()
 (total_grid_import, total_solar_curtailed, annual_grid_cost,
  annual_savings, max_soc, hourly_grid_import,
  hourly_solar_curtailed) = simulate_system(
-    best_design["battery_capacity"],
-    best_design["solar_multiplier"],
+    best_design["storage_duration_hours"],
+    best_design["solar_penetration"],
     return_hourly_data=True,
 )
 
-scaled_solar = solar * best_design["solar_multiplier"]
+scaled_solar = solar * solar_scale_from_penetration(best_design["solar_penetration"])
 total_load = sum(load)
 total_solar = sum(scaled_solar)
 total_solar_used = total_solar - total_solar_curtailed
+solar_penetration = total_solar / total_load
+solar_utilization = total_solar_used / total_solar
+grid_dependence = total_grid_import / total_load
 
 min_price_index = np.argmin(hourly_price)
 max_price_index = np.argmax(hourly_price)
@@ -725,6 +785,9 @@ print("Total Load:", round(total_load, 2), "kWh")
 print("Total Solar Generation:", round(total_solar, 2), "kWh")
 print("Total Solar Used:", round(total_solar_used, 2), "kWh")
 print("Total Solar Curtailment:", round(total_solar_curtailed, 2), "kWh")
+print("Solar Penetration:", round(solar_penetration * 100, 2), "%")
+print("Solar Utilization:", round(solar_utilization * 100, 2), "%")
+print("Grid Dependence:", round(grid_dependence * 100, 2), "%")
 print("Minimum Price:", round(hourly_price[min_price_index], 4), "EUR/kWh")
 print("Curtailment at Minimum Price:", round(hourly_solar_curtailed[min_price_index], 2), "kWh")
 print("Maximum Price:", round(hourly_price[max_price_index], 4), "EUR/kWh")
@@ -741,20 +804,22 @@ if len(curtailment_indices) > 0:
 # 2D DESIGN MAP
 # ============================
 
-cost_map = np.zeros((len(solar_multipliers), len(battery_sizes)))
+cost_map = np.zeros((len(solar_penetrations), len(storage_durations_hours)))
 
-for i, solar_multiplier in enumerate(solar_multipliers):
-    for j, battery_capacity in enumerate(battery_sizes):
+for i, design_solar_penetration in enumerate(solar_penetrations):
+    for j, design_storage_duration in enumerate(storage_durations_hours):
         (total_grid_import, total_solar_curtailed, annual_grid_cost,
          annual_savings, max_soc) = simulate_system(
-            battery_capacity,
-            solar_multiplier,
+            design_storage_duration,
+            design_solar_penetration,
         )
+
+        battery_capacity = battery_capacity_from_duration(design_storage_duration)
 
         battery_cost = battery_capacity * battery_cost_per_kwh
         annualized_battery_cost = battery_cost / battery_lifetime_years
 
-        solar_cost = solar_multiplier * solar_cost_per_multiplier
+        solar_cost = design_solar_penetration * solar_cost_per_penetration
         annualized_solar_cost = solar_cost / solar_lifetime_years
 
         total_annual_cost = (
@@ -767,11 +832,17 @@ for i, solar_multiplier in enumerate(solar_multipliers):
 plt.figure(figsize=(10, 6))
 plt.imshow(cost_map, aspect="auto", origin="lower")
 plt.colorbar(label="Total Annual Cost (EUR)")
-plt.xticks(ticks=np.arange(len(battery_sizes)), labels=battery_sizes)
-plt.yticks(ticks=np.arange(len(solar_multipliers)), labels=solar_multipliers)
-plt.title("Solar + Battery Design Cost Map")
-plt.xlabel("Battery Capacity (kWh)")
-plt.ylabel("Solar Multiplier")
+plt.xticks(
+    ticks=np.arange(len(storage_durations_hours)),
+    labels=storage_durations_hours,
+)
+plt.yticks(
+    ticks=np.arange(len(solar_penetrations)),
+    labels=[f"{penetration:.0%}" for penetration in solar_penetrations],
+)
+plt.title("Solar Penetration + Storage Duration Cost Map")
+plt.xlabel("Storage Duration (hours)")
+plt.ylabel("Solar Penetration")
 plt.show()
 
 
@@ -819,7 +890,7 @@ plt.show()
 # SENSITIVITY ANALYSIS
 # ============================
 
-analysis_solar_multiplier = 1.0
+analysis_solar_penetration = 0.15
 
 grid_results = []
 curtailment_results = []
@@ -828,17 +899,19 @@ annualized_battery_cost_results = []
 total_annual_cost_results = []
 annual_savings_results = []
 
-for battery_capacity in battery_sizes:
+for storage_duration in storage_durations_hours:
     (total_grid_import, total_solar_curtailed, annual_grid_cost,
      annual_savings, max_soc) = simulate_system(
-        battery_capacity,
-        analysis_solar_multiplier,
+        storage_duration,
+        analysis_solar_penetration,
     )
+
+    battery_capacity = battery_capacity_from_duration(storage_duration)
 
     battery_cost = battery_capacity * battery_cost_per_kwh
     annualized_battery_cost = battery_cost / battery_lifetime_years
 
-    solar_cost = analysis_solar_multiplier * solar_cost_per_multiplier
+    solar_cost = analysis_solar_penetration * solar_cost_per_penetration
     annualized_solar_cost = solar_cost / solar_lifetime_years
 
     total_annual_cost = (
@@ -854,7 +927,8 @@ for battery_capacity in battery_sizes:
     total_annual_cost_results.append(total_annual_cost)
     annual_savings_results.append(annual_savings)
 
-    print("\nBattery Capacity:", battery_capacity, "kWh")
+    print("\nStorage Duration:", storage_duration, "hours")
+    print("Battery Capacity:", round(battery_capacity, 2), "kWh")
     print("Total Grid Import:", round(total_grid_import, 2), "kWh")
     print("Solar Curtailed:", round(total_solar_curtailed, 2), "kWh")
     print("Annual Grid Cost: EUR", round(annual_grid_cost, 2))
@@ -872,28 +946,28 @@ marginal_savings = np.diff(annual_savings_results)
 # ============================
 
 plt.figure(figsize=(10, 5))
-plt.plot(battery_sizes, annual_grid_cost_results, marker="o", linewidth=2, label="Annual Grid Cost")
-plt.plot(battery_sizes, annualized_battery_cost_results, marker="o", linewidth=2, label="Annualized Battery Cost")
-plt.plot(battery_sizes, total_annual_cost_results, marker="o", linewidth=2, label="Total Annual Cost")
-plt.title("Battery Capacity vs Annual System Cost")
-plt.xlabel("Battery Capacity (kWh)")
+plt.plot(storage_durations_hours, annual_grid_cost_results, marker="o", linewidth=2, label="Annual Grid Cost")
+plt.plot(storage_durations_hours, annualized_battery_cost_results, marker="o", linewidth=2, label="Annualized Battery Cost")
+plt.plot(storage_durations_hours, total_annual_cost_results, marker="o", linewidth=2, label="Total Annual Cost")
+plt.title("Storage Duration vs Annual System Cost")
+plt.xlabel("Storage Duration (hours)")
 plt.ylabel("Annual Cost (EUR)")
 plt.legend()
 plt.grid(True)
 plt.show()
 
 plt.figure(figsize=(10, 5))
-plt.plot(battery_sizes, annual_savings_results, marker="o", linewidth=2)
-plt.title("Battery Capacity vs Annual Savings")
-plt.xlabel("Battery Capacity (kWh)")
+plt.plot(storage_durations_hours, annual_savings_results, marker="o", linewidth=2)
+plt.title("Storage Duration vs Annual Savings")
+plt.xlabel("Storage Duration (hours)")
 plt.ylabel("Annual Battery Savings (EUR)")
 plt.grid(True)
 plt.show()
 
 plt.figure(figsize=(10, 5))
-plt.plot(battery_sizes[1:], marginal_savings, marker="o", linewidth=2)
-plt.title("Marginal Savings from Additional Battery Capacity")
-plt.xlabel("Battery Capacity (kWh)")
+plt.plot(storage_durations_hours[1:], marginal_savings, marker="o", linewidth=2)
+plt.title("Marginal Savings from Additional Storage Duration")
+plt.xlabel("Storage Duration (hours)")
 plt.ylabel("Additional Annual Savings (EUR)")
 plt.grid(True)
 plt.show()
