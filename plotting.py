@@ -249,26 +249,28 @@ def plot_storage_savings(sensitivity_table):
     plt.figure(figsize=(10, 5))
     plt.plot(
         sensitivity_table["Storage Duration (hours)"],
-        sensitivity_table["Annual Battery Savings (EUR)"],
+        sensitivity_table["Annual Battery Dispatch Savings (EUR)"],
         marker="o",
         linewidth=2,
     )
-    plt.title("Storage Duration vs Annual Savings")
+    plt.title("Storage Duration vs Annual Battery Dispatch Savings")
     plt.xlabel("Storage Duration (hours)")
-    plt.ylabel("Annual Battery Savings (EUR)")
+    plt.ylabel("Annual Battery Dispatch Savings (EUR)")
     plt.grid(True)
     plt.show()
 
 
 def plot_marginal_savings(sensitivity_table):
     storage_durations = sensitivity_table["Storage Duration (hours)"].to_numpy()
-    annual_savings = sensitivity_table["Annual Battery Savings (EUR)"].to_numpy()
-    marginal_savings = np.diff(annual_savings)
+    annual_battery_dispatch_savings = (
+        sensitivity_table["Annual Battery Dispatch Savings (EUR)"].to_numpy()
+    )
+    marginal_savings = np.diff(annual_battery_dispatch_savings)
 
     plt.figure(figsize=(10, 5))
     plt.plot(storage_durations[1:], marginal_savings, marker="o", linewidth=2)
-    plt.title("Marginal Savings from Additional Storage Duration")
+    plt.title("Marginal Battery Dispatch Savings from Additional Storage Duration")
     plt.xlabel("Storage Duration (hours)")
-    plt.ylabel("Additional Annual Savings (EUR)")
+    plt.ylabel("Additional Battery Dispatch Savings (EUR)")
     plt.grid(True)
     plt.show()

@@ -86,6 +86,41 @@ def total_annual_cost(
     )
 
 
+def calculate_design_economics(
+        annual_grid_cost,
+        battery_capacity,
+        solar_penetration,
+        battery_cost_per_kwh,
+        battery_lifetime_years,
+        solar_cost_per_penetration,
+        solar_lifetime_years,
+        discount_rate):
+    """Return the annual cost pieces for one solar/storage design."""
+    annualized_battery = annualized_battery_cost(
+        battery_capacity,
+        battery_cost_per_kwh,
+        battery_lifetime_years,
+        discount_rate,
+    )
+    annualized_solar = annualized_solar_cost(
+        solar_penetration,
+        solar_cost_per_penetration,
+        solar_lifetime_years,
+        discount_rate,
+    )
+    design_total_annual_cost = (
+        annual_grid_cost
+        + annualized_battery
+        + annualized_solar
+    )
+
+    return {
+        "annualized_battery_cost": annualized_battery,
+        "annualized_solar_cost": annualized_solar,
+        "total_annual_cost": design_total_annual_cost,
+    }
+
+
 def find_best_design(
         profile,
         simulator,
@@ -110,23 +145,17 @@ def find_best_design(
 
             battery_capacity = simulator.battery_capacity(storage_duration)
 
-            annualized_battery = annualized_battery_cost(
+            design_economics = calculate_design_economics(
+                annual_grid_cost,
                 battery_capacity,
+                solar_penetration,
                 battery_cost_per_kwh,
                 battery_lifetime_years,
-                discount_rate,
-            )
-            annualized_solar = annualized_solar_cost(
-                solar_penetration,
                 solar_cost_per_penetration,
                 solar_lifetime_years,
                 discount_rate,
             )
-            design_total_annual_cost = (
-                annual_grid_cost
-                + annualized_battery
-                + annualized_solar
-            )
+            design_total_annual_cost = design_economics["total_annual_cost"]
 
             if design_total_annual_cost < best_cost:
                 best_cost = design_total_annual_cost
@@ -136,8 +165,12 @@ def find_best_design(
                     "battery_capacity": battery_capacity,
                     "total_annual_cost": design_total_annual_cost,
                     "annual_grid_cost": annual_grid_cost,
-                    "annualized_battery_cost": annualized_battery,
-                    "annualized_solar_cost": annualized_solar,
+                    "annualized_battery_cost": (
+                        design_economics["annualized_battery_cost"]
+                    ),
+                    "annualized_solar_cost": (
+                        design_economics["annualized_solar_cost"]
+                    ),
                     "max_soc": max_soc,
                     "solar_curtailed": total_solar_curtailed,
                     "annual_battery_dispatch_savings": (
@@ -169,7 +202,7 @@ def build_cost_map(
             )
 
             battery_capacity = simulator.battery_capacity(design_storage_duration)
-            cost_map[i, j] = total_annual_cost(
+            design_economics = calculate_design_economics(
                 annual_grid_cost,
                 battery_capacity,
                 design_solar_penetration,
@@ -179,6 +212,7 @@ def build_cost_map(
                 solar_lifetime_years,
                 discount_rate,
             )
+            cost_map[i, j] = design_economics["total_annual_cost"]
 
     return cost_map
 
@@ -214,7 +248,8 @@ def build_design_uncertainty_comparison(
     }
 
     for solar_index, design_solar_penetration in enumerate(solar_penetrations):
-        for duration_index, design_storage_duration in enumerate(storage_durations_hours):
+        for duration_index, design_storage_duration in enumerate(
+                storage_durations_hours):
             design_battery_capacity = simulator.battery_capacity(
                 design_storage_duration
             )
@@ -225,23 +260,30 @@ def build_design_uncertainty_comparison(
             )
             design_scaled_solar = simulator.scaled_solar(design_solar_penetration)
             design_annual_solar = np.sum(design_scaled_solar)
-            design_solar_utilization = (
-                (design_annual_solar - design_solar_curtailed) / design_annual_solar
+            if design_annual_solar > 0:
+                design_solar_utilization = (
+                    (design_annual_solar - design_solar_curtailed)
+                    / design_annual_solar
+                )
+            else:
+                design_solar_utilization = 0
+
+            design_economics = calculate_design_economics(
+                design_grid_cost,
+                design_battery_capacity,
+                design_solar_penetration,
+                battery_cost_per_kwh,
+                battery_lifetime_years,
+                solar_cost_per_penetration,
+                solar_lifetime_years,
+                discount_rate,
             )
+
             design_result = {
                 "Solar Penetration": design_solar_penetration,
                 "Storage Duration (hours)": design_storage_duration,
                 "Battery Capacity (kWh)": design_battery_capacity,
-                "Annual Cost (EUR)": total_annual_cost(
-                    design_grid_cost,
-                    design_battery_capacity,
-                    design_solar_penetration,
-                    battery_cost_per_kwh,
-                    battery_lifetime_years,
-                    solar_cost_per_penetration,
-                    solar_lifetime_years,
-                    discount_rate,
-                ),
+                "Annual Cost (EUR)": design_economics["total_annual_cost"],
                 "Solar Curtailment (kWh)": design_solar_curtailed,
                 "Solar Utilization": design_solar_utilization,
                 "Grid Dependence": design_grid_import / profile.annual_load,
@@ -333,22 +375,15 @@ def run_storage_sensitivity(
         )
 
         battery_capacity = simulator.battery_capacity(storage_duration)
-        annualized_battery = annualized_battery_cost(
+        design_economics = calculate_design_economics(
+            annual_grid_cost,
             battery_capacity,
+            analysis_solar_penetration,
             battery_cost_per_kwh,
             battery_lifetime_years,
-            discount_rate,
-        )
-        annualized_solar = annualized_solar_cost(
-            analysis_solar_penetration,
             solar_cost_per_penetration,
             solar_lifetime_years,
             discount_rate,
-        )
-        design_total_annual_cost = (
-            annual_grid_cost
-            + annualized_battery
-            + annualized_solar
         )
 
         sensitivity_results.append({
@@ -357,8 +392,10 @@ def run_storage_sensitivity(
             "Total Grid Import (kWh)": total_grid_import,
             "Solar Curtailed (kWh)": total_solar_curtailed,
             "Annual Grid Cost (EUR)": annual_grid_cost,
-            "Annualized Battery Cost (EUR)": annualized_battery,
-            "Total Annual Cost (EUR)": design_total_annual_cost,
+            "Annualized Battery Cost (EUR)": (
+                design_economics["annualized_battery_cost"]
+            ),
+            "Total Annual Cost (EUR)": design_economics["total_annual_cost"],
             "Annual Battery Dispatch Savings (EUR)": (
                 annual_battery_dispatch_savings
             ),

@@ -9,7 +9,10 @@ def print_best_design(profile, best_design):
     print("Annual Grid Cost: EUR", round(best_design["annual_grid_cost"], 2))
     print("Annualized Battery Cost: EUR", round(best_design["annualized_battery_cost"], 2))
     print("Annualized Solar Cost: EUR", round(best_design["annualized_solar_cost"], 2))
-    print("Annual Battery Savings: EUR", round(best_design["annual_savings"], 2))
+    print(
+        "Annual Battery Dispatch Savings: EUR",
+        round(best_design["annual_battery_dispatch_savings"], 2),
+    )
     print("Max Battery SOC:", round(best_design["max_soc"], 2), "kWh")
     print("Solar Curtailed:", round(best_design["solar_curtailed"], 2), "kWh")
     print("Grid Dependence:", round(best_design["grid_dependence"] * 100, 2), "%")
@@ -151,7 +154,7 @@ def print_storage_sensitivity(sensitivity_table):
         )
         print("Total Annual Cost: EUR", round(result["Total Annual Cost (EUR)"], 2))
         print(
-            "Annual Battery Savings: EUR",
-            round(result["Annual Battery Savings (EUR)"], 2),
+            "Annual Battery Dispatch Savings: EUR",
+            round(result["Annual Battery Dispatch Savings (EUR)"], 2),
         )
         print("Max SOC:", round(result["Max SOC (kWh)"], 2), "kWh")

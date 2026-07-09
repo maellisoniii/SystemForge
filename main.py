@@ -100,6 +100,9 @@ def main():
         solar_cost_per_penetration=solar_cost_per_penetration,
         solar_lifetime_years=solar_lifetime_years,
         discount_rate=discount_rate,
+        battery_power_ratio=battery_power_ratio,
+        battery_charge_efficiency=battery_charge_efficiency,
+        battery_discharge_efficiency=battery_discharge_efficiency,
         num_scenarios=num_monte_carlo_scenarios,
         solar_variability=solar_variability,
         load_variability=load_variability,
@@ -130,6 +133,9 @@ def main():
         solar_cost_per_penetration,
         solar_lifetime_years,
         discount_rate,
+        battery_power_ratio,
+        battery_charge_efficiency,
+        battery_discharge_efficiency,
     )
     print_uncertainty_table(uncertainty_table)
     plot_uncertainty_source_table(uncertainty_table)
@@ -148,6 +154,9 @@ def main():
             solar_cost_per_penetration,
             solar_lifetime_years,
             discount_rate,
+            battery_power_ratio,
+            battery_charge_efficiency,
+            battery_discharge_efficiency,
             solar_variability,
             load_variability,
             price_variability,

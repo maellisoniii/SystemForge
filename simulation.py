@@ -1,124 +1,159 @@
 import numpy as np
-from scipy.optimize import linprog
-from scipy.sparse import csr_matrix, diags, eye, hstack, vstack
+
+from SystemForge.optimization import optimize_battery_dispatch
 
 
-def optimize_battery_dispatch(
-        load,
-        hourly_price,
-        battery_capacity,
-        scaled_solar,
-        battery_power_ratio,
-        battery_charge_efficiency=1.0,
-        battery_discharge_efficiency=1.0):
-    """Solve the hourly battery schedule that minimizes annual grid cost.
+def solar_scale_from_penetration(profile, solar_penetration):
+    """Scale the recorded solar profile to the requested annual penetration."""
+    return solar_penetration / profile.reference_solar_penetration
 
-    The optimizer has perfect knowledge of the price, load, and solar profile.
-    It chooses grid import, charging, discharging, curtailment, and state of
-    charge subject to energy-balance, capacity, and power constraints.
 
-    Dispatch model:
-    - This is a perfect-foresight planning benchmark.
-    - The optimizer sees the full load, solar, and price profile before making
-      hourly charge/discharge decisions.
-    - Energy balance is modeled on the grid/load side:
-      grid import + discharge = net load + charge + curtailment.
-    - Battery state of charge is modeled inside the battery:
-      SOC_next = SOC + charge_efficiency * charge
-                 - discharge / discharge_efficiency.
-    """
-    number_of_hours = len(load)
+def battery_capacity_from_duration(profile, storage_duration_hours):
+    """Convert storage duration to capacity using average hourly load."""
+    return storage_duration_hours * profile.average_load
 
-    if not 0 < battery_charge_efficiency <= 1:
-        raise ValueError("battery_charge_efficiency must be greater than 0 and at most 1")
-    if not 0 < battery_discharge_efficiency <= 1:
-        raise ValueError("battery_discharge_efficiency must be greater than 0 and at most 1")
 
-    # Net load is load after using same-hour solar directly.
-    # Positive net load means the system needs energy from the grid or battery.
-    # Negative net load means there is surplus solar that can charge the battery
-    # or be curtailed.
-    net_load = load - scaled_solar
+class SystemSimulator:
+    """Runs deterministic simulations for one standardized energy profile."""
 
-    if battery_capacity == 0:
+    def __init__(
+            self,
+            profile,
+            battery_power_ratio,
+            battery_charge_efficiency,
+            battery_discharge_efficiency):
+        self.profile = profile
+        self.battery_power_ratio = battery_power_ratio
+        self.battery_charge_efficiency = battery_charge_efficiency
+        self.battery_discharge_efficiency = battery_discharge_efficiency
+        self.simulation_cache = {}
+
+    def scaled_solar(self, solar_penetration):
         return (
-            np.maximum(net_load, 0),
-            np.maximum(-net_load, 0),
-            np.zeros(number_of_hours + 1),
+            self.profile.solar_kwh
+            * solar_scale_from_penetration(self.profile, solar_penetration)
         )
 
-    identity = eye(number_of_hours, format="csr")
-    zero_soc = csr_matrix((number_of_hours, number_of_hours + 1))
-    zero_hourly = csr_matrix((number_of_hours, number_of_hours))
-    state_of_charge_change = diags(
-        [-np.ones(number_of_hours), np.ones(number_of_hours)],
-        [0, 1],
-        shape=(number_of_hours, number_of_hours + 1),
-        format="csr",
+    def battery_capacity(self, storage_duration_hours):
+        return battery_capacity_from_duration(self.profile, storage_duration_hours)
+
+    def simulate_system(
+            self,
+            storage_duration_hours,
+            solar_penetration,
+            return_hourly_data=False):
+        battery_capacity = self.battery_capacity(storage_duration_hours)
+        scaled_solar = self.scaled_solar(solar_penetration)
+
+        load = self.profile.load_kwh
+        hourly_price = self.profile.price_per_kwh
+
+        if (len(load) != len(scaled_solar)
+                or len(load) != len(hourly_price)):
+            raise ValueError("load, solar, and price arrays must have identical lengths")
+
+        cache_key = (storage_duration_hours, solar_penetration)
+
+        if not return_hourly_data and cache_key in self.simulation_cache:
+            return self.simulation_cache[cache_key]
+
+        grid_import, solar_curtailed, battery_soc = optimize_battery_dispatch(
+            load,
+            hourly_price,
+            battery_capacity,
+            scaled_solar,
+            self.battery_power_ratio,
+            self.battery_charge_efficiency,
+            self.battery_discharge_efficiency,
+        )
+        grid_cost = np.dot(grid_import, hourly_price)
+
+        # This baseline is used to estimate the value of battery dispatch.
+        # It is the grid-import cost for the same load and solar design if the
+        # battery did not operate. The resulting difference is therefore battery
+        # dispatch savings, not total project savings.
+        grid_cost_without_battery_dispatch = np.dot(
+            np.maximum(load - scaled_solar, 0),
+            hourly_price,
+        )
+        annual_battery_dispatch_savings = (
+            grid_cost_without_battery_dispatch - grid_cost
+        )
+
+        results = (
+            np.sum(grid_import),
+            np.sum(solar_curtailed),
+            grid_cost,
+            annual_battery_dispatch_savings,
+            np.max(battery_soc),
+        )
+
+        if not return_hourly_data:
+            self.simulation_cache[cache_key] = results
+            return results
+
+        return results + (grid_import, solar_curtailed)
+
+
+def analyze_load_solar_price(profile, simulator, best_design):
+    """Calculate load, solar, curtailment, and price summary metrics."""
+    (total_grid_import, total_solar_curtailed, annual_grid_cost,
+     annual_battery_dispatch_savings, max_soc, hourly_grid_import,
+     hourly_solar_curtailed) = simulator.simulate_system(
+        best_design["storage_duration_hours"],
+        best_design["solar_penetration"],
+        return_hourly_data=True,
     )
 
-    # Variable order: grid import, charge, discharge, curtailment, state of charge.
-    #
-    # Energy balance uses charge and discharge as grid/load-side energy flows:
-    # grid - charge + discharge - curtailment = load - solar
-    energy_balance = hstack(
-        [identity, -identity, identity, -identity, zero_soc],
-        format="csr",
-    )
-    # Battery balance converts those external energy flows into internal stored
-    # energy using charge and discharge efficiency assumptions.
-    battery_balance = hstack(
-        [
-            zero_hourly,
-            -battery_charge_efficiency * identity,
-            (1 / battery_discharge_efficiency) * identity,
-            zero_hourly,
-            state_of_charge_change,
-        ],
-        format="csr",
-    )
-    equality_constraints = vstack([energy_balance, battery_balance], format="csr")
-    equality_values = np.concatenate([net_load, np.zeros(number_of_hours)])
+    scaled_solar = simulator.scaled_solar(best_design["solar_penetration"])
+    total_load = sum(profile.load_kwh)
+    total_solar = sum(scaled_solar)
+    total_solar_used = total_solar - total_solar_curtailed
 
-    number_of_variables = 5 * number_of_hours + 1
-    grid_start = 0
-    charge_start = number_of_hours
-    discharge_start = 2 * number_of_hours
-    curtailment_start = 3 * number_of_hours
-    soc_start = 4 * number_of_hours
+    if total_load <= 0:
+        raise ValueError("total load must be greater than zero")
+    if total_solar <= 0:
+        solar_penetration = 0
+        solar_utilization = 0
+    else:
+        solar_penetration = total_solar / total_load
+        solar_utilization = total_solar_used / total_solar
 
-    objective = np.zeros(number_of_variables)
-    objective[grid_start:charge_start] = hourly_price
-    # A tiny throughput penalty removes unnecessary charge/discharge cycles.
-    objective[charge_start:discharge_start] = 1e-9
-    objective[discharge_start:curtailment_start] = 1e-9
+    grid_dependence = total_grid_import / total_load
 
-    lower_bounds = np.zeros(number_of_variables)
-    upper_bounds = np.full(number_of_variables, np.inf)
-    max_power = battery_capacity * battery_power_ratio
-    upper_bounds[charge_start:discharge_start] = max_power
-    upper_bounds[discharge_start:curtailment_start] = max_power
-    upper_bounds[curtailment_start:soc_start] = scaled_solar
-    upper_bounds[soc_start:] = battery_capacity
+    min_price_index = np.argmin(profile.price_per_kwh)
+    max_price_index = np.argmax(profile.price_per_kwh)
+    curtailment_indices = np.where(hourly_solar_curtailed > 0)[0]
 
-    # Start and end the period empty so the optimizer cannot borrow energy from
-    # outside the analysis period or leave a free stored-energy benefit behind.
-    upper_bounds[soc_start] = 0
-    upper_bounds[-1] = 0
+    min_curtailment_price_index = None
+    max_curtailment_price_index = None
 
-    solution = linprog(
-        objective,
-        A_eq=equality_constraints,
-        b_eq=equality_values,
-        bounds=list(zip(lower_bounds, upper_bounds)),
-        method="highs",
-    )
+    if len(curtailment_indices) > 0:
+        min_curtailment_price_index = curtailment_indices[
+            np.argmin(profile.price_per_kwh[curtailment_indices])
+        ]
+        max_curtailment_price_index = curtailment_indices[
+            np.argmax(profile.price_per_kwh[curtailment_indices])
+        ]
 
-    if not solution.success:
-        raise RuntimeError(f"Battery dispatch optimization failed: {solution.message}")
-
-    return (
-        solution.x[grid_start:charge_start],
-        solution.x[curtailment_start:soc_start],
-        solution.x[soc_start:],
-    )
+    return {
+        "total_grid_import": total_grid_import,
+        "total_solar_curtailed": total_solar_curtailed,
+        "annual_grid_cost": annual_grid_cost,
+        "annual_battery_dispatch_savings": annual_battery_dispatch_savings,
+        "max_soc": max_soc,
+        "hourly_grid_import": hourly_grid_import,
+        "hourly_solar_curtailed": hourly_solar_curtailed,
+        "scaled_solar": scaled_solar,
+        "total_load": total_load,
+        "total_solar": total_solar,
+        "total_solar_used": total_solar_used,
+        "solar_penetration": solar_penetration,
+        "solar_utilization": solar_utilization,
+        "grid_dependence": grid_dependence,
+        "min_price_index": min_price_index,
+        "max_price_index": max_price_index,
+        "curtailment_indices": curtailment_indices,
+        "min_curtailment_price_index": min_curtailment_price_index,
+        "max_curtailment_price_index": max_curtailment_price_index,
+    }

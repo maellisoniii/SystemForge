@@ -8,16 +8,43 @@ def optimize_battery_dispatch(
         hourly_price,
         battery_capacity,
         scaled_solar,
-        battery_power_ratio):
+        battery_power_ratio,
+        battery_charge_efficiency,
+        battery_discharge_efficiency):
     """Solve the hourly battery schedule that minimizes annual grid cost.
 
     The optimizer has perfect knowledge of the price, load, and solar profile.
     It chooses grid import, charging, discharging, curtailment, and state of
     charge subject to energy-balance, capacity, and power constraints.
+
+    Dispatch model:
+    - This is a perfect-foresight planning benchmark.
+    - The optimizer sees the full load, solar, and price profile before making
+      hourly charge/discharge decisions.
+    - Energy balance is modeled on the grid/load side:
+      grid import + discharge = net load + charge + curtailment.
+    - Battery state of charge is modeled inside the battery:
+      SOC_next = SOC + charge_efficiency * charge
+                 - discharge / discharge_efficiency.
+    - Round-trip efficiency is approximately:
+      charge_efficiency * discharge_efficiency.
+
+    Efficiencies are required inputs so the deterministic optimization cannot
+    accidentally fall back to an ideal battery assumption.
     """
-    ### Assumes perfect foresight, which is good for first order analysis, but not realistic. Should consider adding a more realistic dispatch model that uses only past and present information to make decisions.
     number_of_hours = len(load)
-    ### grid import + solar + discharge = load + charge + curtailment
+
+    if not 0 < battery_charge_efficiency <= 1:
+        raise ValueError("battery_charge_efficiency must be greater than 0 and at most 1")
+    if not 0 < battery_discharge_efficiency <= 1:
+        raise ValueError("battery_discharge_efficiency must be greater than 0 and at most 1")
+    if battery_power_ratio < 0:
+        raise ValueError("battery_power_ratio cannot be negative")
+
+    # Net load is load after using same-hour solar directly.
+    # Positive net load means the system needs energy from the grid or battery.
+    # Negative net load means there is surplus solar that can charge the battery
+    # or be curtailed.
     net_load = load - scaled_solar
 
     if battery_capacity == 0:
@@ -38,15 +65,20 @@ def optimize_battery_dispatch(
     )
 
     # Variable order: grid import, charge, discharge, curtailment, state of charge.
+    #
+    # Energy balance uses charge and discharge as grid/load-side energy flows:
+    # grid - charge + discharge - curtailment = load - solar
     energy_balance = hstack(
         [identity, -identity, identity, -identity, zero_soc],
         format="csr",
     )
+    # Battery balance converts those external energy flows into internal stored
+    # energy using charge and discharge efficiency assumptions.
     battery_balance = hstack(
         [
             zero_hourly,
-            -identity,
-            identity,
+            -battery_charge_efficiency * identity,
+            (1 / battery_discharge_efficiency) * identity,
             zero_hourly,
             state_of_charge_change,
         ],
@@ -97,4 +129,3 @@ def optimize_battery_dispatch(
         solution.x[curtailment_start:soc_start],
         solution.x[soc_start:],
     )
-### Currently, there is no model for battery round-trip efficiency. This is a first-order analysis, and the battery is assumed to be ideal. A more realistic model would include round-trip efficiency, which would reduce the value of the battery and increase the cost of grid imports.
