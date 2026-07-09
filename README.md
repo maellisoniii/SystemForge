@@ -1,127 +1,153 @@
 # SystemForge
-SystemForge is a systems engineering platform capable of modeling and optimizing complex infrastructure sytems. 
+A modular energy systems modeling platform for evaluating solar-storage system designs under operational and economic uncertainty.
 
-## Current Module 
-SystemForge-Energy
+SystemForge combines deterministic optimization, economic analysis, and probabilistic simulation to evaluate how solar generation, battery storage, and electricity markets interact over time.
 
-### Objective 
-Develop a solar + battery + grid optimization platform capable of: 
-- Energy flow simulation 
-- Cost Optimization
-- Emissions analysis
-- Resilience analysis
-- Infrastructure decision support
+The platform is designed to support infrastructure planning, energy system analysis, and systems engineering research.
 
-## Phase 1 
-Energy Flow Simulation 
-Goals: 
-- Model building load
-- Model solar generation
-- Calculate net load
-- Simulate battery dispatch
+## Current Capabilities  
+### Deterministic Energy System Simulation
 
-A synthetic 24-hour demand and solar profile was developed to visualize model behavior. 
-Inputs included: 
-- Hourly load (kWh)
-- Hourly solar production (kWh)
-- Varying electricity prices
-- Battery Capacity
+SystemForge models hourly operation of an electrical system using:
+- Building electrical demand
+- Solar generation
+- Battery storage
+- Grid electricity
+- Hourly electricity prices
 
-The model simualted: 
-- Battery charging from energy surplus
+For every simulated hour, the platform tracks:
+- Grid imports
+- Battery state of charge
+- Battery charging/discharging
+- Solar curtailment
+- Annual grid cost
+- Battery dispatch value
+
+## Linear Programming Battery Dispatch
+
+Battery operation is formulated as a linear optimization problem.
+Decision variables include:
+
+- Grid import
+- Battery charging
 - Battery discharging
-- Grid imports
 - Solar curtailment
-- Annual costs and savings
+- Battery state of charge
 
-Battery Dispatch Logic
-For each hour: 
-- Solar Generation was compared against electrical demand
-- Surplus solar charged the battery
-- Remaining surplus (curtailed energy) was calculated
-- During deficits, the battery discharged when economically favorable
-- Remaining demand was supplied by the electrical grid
+The optimizer minimizes annual electricity cost while satisfying:
+- Hourly energy balance
+- Battery capacity limits
+- Battery power limits
+- Charge/discharge efficiency
+- State-of-charge constraints
 
-Outputs: 
-- Grid imports
-- Battery charge level
+The deterministic optimizer assumes perfect foresight, making it appropriate as a planning benchmark.
+
+## Design Space Exploration
+
+Rather than evaluating only one system, SystemForge searches across combinations of:
+- Solar penetration
+- Storage duration
+
+For every candidate design the platform computes:
+- Annual grid cost
+- Annualized battery cost
+- Annualized solar cost
+- Total annual cost
 - Solar curtailment
-- Annual costs and savings
+- Grid dependence
+- Battery dispatch savings
 
-Economic Analysis: 
-Battery Cost = Capacity x Cost per kWh 
+The lowest-cost configuration becomes the current optimal design.
 
-Assumptions: 
-- Battery Cost = 300 EUR/kWh
-- Battery lifetime = 10 years
+## Economic Model
 
-Annualized battery cost: 
-- Annualized Cost = Battery Cost / Lifetime
+SystemForge annualizes infrastructure costs using the Capital Recovery Factor (CRF) rather than simple lifetime division.
 
-Solar Cost: 
-Solar capacity was scaled using a solar multiplier. 
+Current economic assumptions include:
+- Battery capital cost
+- Solar capital cost
+- Asset lifetime
+- Discount rate
 
-Assumptions: 
-- Solar cost = 8,000 EUR per unit
-- Solar lifetime = 20 years
+These assumptions are centralized in config.py, allowing rapid scenario analysis.
 
-Annualized Solar Cost = Solar Cost / Lifetime
+## Uncertainty Analysis
 
-## Phase 2: Real Data Integration
-https://data.open-power-system-data.org/time_series/
-This data was aggregated across the EU and some neighboring countries. Data includes load, wind and solar, prices in hourly resolution. 6 years worth of data (2017-2023).
+Future operating conditions are uncertain.
+SystemForge evaluates uncertainty using Monte Carlo simulation.
 
-Dataset characteristics: 
-- Approximately 50,000 hourly observations
-- Germany electrical system was selected
-- ENTSO-E transparency data
-- Day-ahead electricity prices
+Each scenario perturbs:
+- Solar yield
+- Electrical demand
+- Electricity price
+- Electricity price shift
 
-Key variables: 
+Monte Carlo dispatch currently uses a threshold-based operating policy that approximates realistic battery behavior while remaining computationally efficient.
 
-DE_load_actual_entsoe_transparency
-DE_solar_generation_actual
-AT_price_day_ahead
+Outputs include:
+- Expected annual cost
+- Cost standard deviation
+- Value at Risk (VaR)
+- Conditional Value at Risk (CVaR)
+- Confidence intervals
 
-Data cleaning included: 
-- Missing value identification
-- Interpolation of missing observations
-- Unit verification
-- Length consistency checks
+## Software Architecture 
+main.py 
+├── config.py
+├── data_profiles.py
+├── simulation.py
+├── optimization.py
+├── design_search.py
+├── monte_carlo.py
+├── risk.py
+├── reporting.py
+└── plotting.py 
 
-# Results 
-Load Analysis
-- German load data showed realistic demand ranges (35kWh - 70kWh)
-- Strong daily cycles
 
-Solar Analysis
-- Distinct daytime peaks
-- Significant variability
+## Current Assumptions
 
-Max solar fraction:
-Solar Generation / Load = 0.73
-(73% of system demand was met by solar)
+Current implementation includes:
+- Deterministic perfect-foresight dispatch
+- Battery charge/discharge efficiency
+- Battery power limits
+- Capital Recovery Factor annualization
+- Hourly energy balance
+- Grid charging capability
+- Solar curtailment
 
-Solar Fraction Distribution: 
-------
+Current data source:
+- Germany electrical load
+- Germany solar generation
+- Austrian day-ahead electricity prices
 
-Curtailment Analysis
------ 
+using the Open Power System Data project.
 
-Battery Economics 
-------
+## Current Limitations
 
-Market-based Battery Operation
-----
+The current model intentionally simplifies several aspects of real power systems.
 
-## Stage 3 
-Introduced determinisitic linear-programming battery dispatch. Monte carlo simulatons remain rule-based and will be upgraded next stage. 
-## Software Tools 
-- Python
-- Numpy
-- Pandas
-- Matplotlib
-- Visual Studio Code
+Examples include:
+- Perfect information in deterministic dispatch
+- Simplified battery degradation
+- No transmission constraints
+- Single-node electrical system
+- Fixed design grid search
+- Threshold-based Monte Carlo dispatch instead of repeated linear optimization
+
+
+
 
 ## Long-Term Vision 
 SystemForge will become a portfolio of systems engineering tools focused on energy, sustainability, and optimized infrastructure. 
+
+Potential future modules include:
+- Microgrid planning
+- Hydrogen systems
+- Water infrastructure
+- Transportation systems
+- Industrial energy optimization
+- Multi-energy network optimization
+
+
+
