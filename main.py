@@ -9,11 +9,14 @@ if str(workspace_dir) not in sys.path:
 
 from SystemForge.config import (
     analysis_solar_penetration,
+    battery_charge_efficiency,
     battery_cost_per_kwh,
+    battery_discharge_efficiency,
     battery_lifetime_years,
     battery_power_ratio,
     data_profile_config,
     design_comparison_scenarios,
+    discount_rate,
     load_variability,
     monte_carlo_seed,
     num_monte_carlo_scenarios,
@@ -61,7 +64,12 @@ from SystemForge.simulation import SystemSimulator, analyze_load_solar_price
 def main():
     """Conductor for the SystemForge analysis workflow."""
     energy_profile = EnergyDataProfile.from_csv(**data_profile_config)
-    simulator = SystemSimulator(energy_profile, battery_power_ratio)
+    simulator = SystemSimulator(
+        energy_profile,
+        battery_power_ratio,
+        battery_charge_efficiency,
+        battery_discharge_efficiency,
+    )
 
     solar_cost_per_penetration = (
         solar_cost_reference / energy_profile.reference_solar_penetration
@@ -76,6 +84,7 @@ def main():
         battery_lifetime_years,
         solar_cost_per_penetration,
         solar_lifetime_years,
+        discount_rate,
     )
     print_best_design(energy_profile, best_design)
 
@@ -90,6 +99,7 @@ def main():
         battery_lifetime_years=battery_lifetime_years,
         solar_cost_per_penetration=solar_cost_per_penetration,
         solar_lifetime_years=solar_lifetime_years,
+        discount_rate=discount_rate,
         num_scenarios=num_monte_carlo_scenarios,
         solar_variability=solar_variability,
         load_variability=load_variability,
@@ -119,6 +129,7 @@ def main():
         battery_lifetime_years,
         solar_cost_per_penetration,
         solar_lifetime_years,
+        discount_rate,
     )
     print_uncertainty_table(uncertainty_table)
     plot_uncertainty_source_table(uncertainty_table)
@@ -136,6 +147,7 @@ def main():
             battery_lifetime_years,
             solar_cost_per_penetration,
             solar_lifetime_years,
+            discount_rate,
             solar_variability,
             load_variability,
             price_variability,
@@ -166,6 +178,7 @@ def main():
         battery_lifetime_years,
         solar_cost_per_penetration,
         solar_lifetime_years,
+        discount_rate,
     )
     plot_cost_map(cost_map, storage_durations_hours, solar_penetrations)
 
@@ -180,6 +193,7 @@ def main():
         battery_lifetime_years,
         solar_cost_per_penetration,
         solar_lifetime_years,
+        discount_rate,
     )
     print_storage_sensitivity(sensitivity_table)
 

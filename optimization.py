@@ -15,7 +15,9 @@ def optimize_battery_dispatch(
     It chooses grid import, charging, discharging, curtailment, and state of
     charge subject to energy-balance, capacity, and power constraints.
     """
+    ### Assumes perfect foresight, which is good for first order analysis, but not realistic. Should consider adding a more realistic dispatch model that uses only past and present information to make decisions.
     number_of_hours = len(load)
+    ### grid import + solar + discharge = load + charge + curtailment
     net_load = load - scaled_solar
 
     if battery_capacity == 0:
@@ -95,3 +97,4 @@ def optimize_battery_dispatch(
         solution.x[curtailment_start:soc_start],
         solution.x[soc_start:],
     )
+### Currently, there is no model for battery round-trip efficiency. This is a first-order analysis, and the battery is assumed to be ideal. A more realistic model would include round-trip efficiency, which would reduce the value of the battery and increase the cost of grid imports.
