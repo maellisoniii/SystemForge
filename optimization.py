@@ -1,3 +1,5 @@
+from pyexpat import model
+
 import numpy as np
 import pyomo.environ as pyo
 from scipy.optimize import linprog
@@ -132,16 +134,76 @@ def optimize_battery_dispatch_scipy(
         solution.x[curtailment_start:soc_start],
         solution.x[soc_start:],
     )
+
 # 
 # Pyomo implementation
 # 
-def build_dispatch_model(): 
-    model = pyo.ConcreteModel(
-        name = "Deterministic_Dispatch"
+def build_dispatch_model(
+        load: np.ndarray,
+        hourly_price: np.ndarray,
+        battery_capacity: float,
+        solar: np.ndarray,
+        battery_power: float,
+        battery_charge_efficiency: float,
+        battery_discharge_efficiency: float
+):
+    # Time series inputs are converted to float arrays to ensure compatibility with Pyomo's data handling.
+    load = np.asarray(load, dtype=float)
+    solar = np.asarray(solar, dtype=float)
+    hourly_price = np.asarray(hourly_price, dtype=float)
+
+    model = pyo.ConcreteModel(name="Deterministic_Dispatch")
+
+    # Input validation
+    if not (len(load) == len(hourly_price) == len(solar)):
+        raise ValueError("Load, solar, and hourly price arrays must have the same length.")
+
+    if len(load) == 0:
+        raise ValueError("Load, solar, and hourly price arrays must not be empty.")
+
+    if battery_capacity < 0:
+        raise ValueError("Battery capacity must be non-negative.")
+
+    if battery_power < 0:
+        raise ValueError("Battery power must be non-negative.")
+
+    if not (0 < battery_charge_efficiency <= 1):
+        raise ValueError("Battery charge efficiency must be > 0 and <= 1.")
+
+    if not (0 < battery_discharge_efficiency <= 1):
+        raise ValueError("Battery discharge efficiency must be > 0 and <= 1.")
+
+    # Horizon length
+    number_of_hours = len(load)
+
+    # Sets
+    model.T = pyo.RangeSet(0, number_of_hours - 1)
+    # SOC requires one additional timestep for the end-of-horizon state of charge
+    model.T_SOC = pyo.RangeSet(0, number_of_hours)
+
+    # Time-varying parameters
+    model.load = pyo.Param(
+        model.T,
+        initialize={t: float(load[t]) for t in range(number_of_hours)},
     )
+
+    model.solar = pyo.Param(
+        model.T,
+        initialize={t: float(solar[t]) for t in range(number_of_hours)},
+    )
+
+    model.hourly_price = pyo.Param(
+        model.T,
+        initialize={t: float(hourly_price[t]) for t in range(number_of_hours)},
+    )
+
+    # Battery parameters
+    model.battery_capacity = pyo.Param(initialize=float(battery_capacity))
+    model.battery_power = pyo.Param(initialize=float(battery_power))
+    model.battery_charge_efficiency = pyo.Param(initialize=float(battery_charge_efficiency))
+    model.battery_discharge_efficiency = pyo.Param(initialize=float(battery_discharge_efficiency))
+
     return model
 
-if __name__ == "__main__":
-    model = build_dispatch_model()
-    model.pprint
-    
+
+
