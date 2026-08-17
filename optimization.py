@@ -1,9 +1,12 @@
 import numpy as np
+import pyomo.environ as pyo
 from scipy.optimize import linprog
 from scipy.sparse import csr_matrix, diags, eye, hstack, vstack
 
+# Legacy SciPy implementation 
+# Used as a deterministic validation benchmark during migration
 
-def optimize_battery_dispatch(
+def optimize_battery_dispatch_scipy(
         load,
         hourly_price,
         battery_capacity,
@@ -129,3 +132,16 @@ def optimize_battery_dispatch(
         solution.x[curtailment_start:soc_start],
         solution.x[soc_start:],
     )
+# 
+# Pyomo implementation
+# 
+def build_dispatch_model(): 
+    model = pyo.ConcreteModel(
+        name = "Deterministic_Dispatch"
+    )
+    return model
+
+if __name__ == "__main__":
+    model = build_dispatch_model()
+    model.pprint
+    
