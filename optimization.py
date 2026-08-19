@@ -1,9 +1,32 @@
-from xml.parsers.expat import model
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pyomo.environ as pyo
 from scipy.optimize import linprog
 from scipy.sparse import csr_matrix, diags, eye, hstack, vstack
+
+@dataclass
+class DispatchResult:
+    solver_status: str
+    termination_condition: str
+
+    objective_cost: float
+    grid_cost: float 
+    degradation_cost: float
+
+    grid_import: np.ndarray
+    charge: np.ndarray
+    discharge: np.ndarray
+    curtailment: np.ndarray
+    solar_used: np.ndarray
+    soc: np.ndarray
+
+    balance_residual: np.ndarray
+    soc_residual: np.ndarray
+
+    assumptions: dict[str, Any]
+    metadata: dict[str, Any]
 
 # Legacy SciPy implementation 
 # Used as a deterministic validation benchmark during migration
@@ -145,7 +168,7 @@ def build_dispatch_model(
         solar: np.ndarray,
         battery_power: float,
         battery_charge_efficiency: float,
-battery_discharge_efficiency: float,
+        battery_discharge_efficiency: float,
         initial_soc: float = 0.0,
         degradation_rate: float = 0.0,
 ):
@@ -241,22 +264,35 @@ battery_discharge_efficiency: float,
     # Battery capacity constraint
     model.terminal_soc_constraint = pyo.Constraint(
         expr=model.soc[number_of_hours] == model.soc[0])
+
+    def soc_capacity_rule(model, t):
+        return model.soc[t] <= model.battery_capacity
+
+    model.soc_capacity_constraint = pyo.Constraint(
+        model.T_SOC,
+        rule=soc_capacity_rule,
+    )
+    # Battery power constraints
     def charge_power_constraint_rule(model, t):
         return model.charge[t] <= model.battery_power
-    model.charge_power_constraint = pyo.Constraint(
-        model.T, rule=charge_power_constraint_rule)
-    # Battery power constraints
+
+
     def discharge_power_constraint_rule(model, t):
         return model.discharge[t] <= model.battery_power
-    model.battery_power_constraint_charge = pyo.Constraint(
-        model.T, rule=lambda model, t: model.charge[t] <= model.battery_power
+
+
+    model.charge_power_constraint = pyo.Constraint(
+    model.T,
+    rule=charge_power_constraint_rule
     )
-    model.battery_power_constraint_discharge = pyo.Constraint(
-        model.T, rule=lambda model, t: model.discharge[t] <= model.battery_power
+
+    model.discharge_power_constraint = pyo.Constraint(
+    model.T,
+    rule=discharge_power_constraint_rule
     )
     # Curtailment constraint
     def solar_allocation_rule(model, t):
-        return model.solar_used[t] + model.curtailment[t] <= model.solar_profile[t]
+        return model.solar_used[t] + model.curtailment[t] == model.solar_profile[t]
     model.solar_allocation_constraint = pyo.Constraint(
         model.T, 
         rule=solar_allocation_rule
@@ -305,81 +341,286 @@ def solve_dispatch(
             f"Termination condition: {termination_condition}")
     return results
 
+
+def extract_dispatch_results(
+        model: pyo.ConcreteModel,
+        results: pyo.SolverResults,
+) -> DispatchResult:
+    """
+    Extracts the dispatch results from a solved Pyomo model and returns a DispatchResult dataclass.
+    Parameters
+    ----------
+    model: 
+        A Pyomo ConcreteModel returned by build_dispatch_model.
+        """
+    time_steps = list(model.T)
+    soc_time_steps = list(model.T_SOC)
+
+    grid_import = np.array([pyo.value(model.grid_import[t]) for t in time_steps])
+    charge = np.array([pyo.value(model.charge[t]) for t in time_steps])
+    discharge = np.array([pyo.value(model.discharge[t]) for t in time_steps])
+    curtailment = np.array([pyo.value(model.curtailment[t]) for t in time_steps])
+    solar_used = np.array([pyo.value(model.solar_used[t]) for t in time_steps])
+    soc = np.array([pyo.value(model.soc[t]) for t in soc_time_steps])
+
+    price = np.array([pyo.value(model.hourly_price[t]) for t in time_steps])
+    degradation_rate = pyo.value(model.degradation_rate)
+    grid_cost = np.sum(price * grid_import)
+    degradation_cost = np.sum(degradation_rate * (charge + discharge))
+    objective_cost = pyo.value(model.objective)
+
+    demand = np.array([pyo.value(model.demand[t]) for t in time_steps])
+    balance_residual = grid_import + solar_used + discharge - demand - charge
+
+    charge_efficiency = pyo.value(model.battery_charge_efficiency)
+    discharge_efficiency = pyo.value(model.battery_discharge_efficiency)
+
+    soc_residual = (
+        soc[1:]
+        - soc[:-1]
+        - charge_efficiency * charge
+        + discharge / discharge_efficiency
+    )
+    assumptions = {
+        "battery_capacity": pyo.value(model.battery_capacity),
+        "battery_power": pyo.value(model.battery_power),
+        "battery_charge_efficiency": charge_efficiency,
+        "battery_discharge_efficiency": discharge_efficiency,
+        "degradation_rate": degradation_rate,
+        "initial_soc": pyo.value(model.initial_soc),
+    }
+    metadata = {
+        "number_of_hours": len(time_steps),
+        "model_name": model.name,
+    }
+    return DispatchResult(
+        solver_status=str(results.solver.status),
+        termination_condition=str(results.solver.termination_condition),
+        objective_cost=float(objective_cost),
+        grid_cost=float(grid_cost),
+        degradation_cost=float(degradation_cost),
+        grid_import=grid_import,
+        charge=charge,
+        discharge=discharge,
+        curtailment=curtailment,
+        solar_used=solar_used,
+        soc=soc,
+        balance_residual=balance_residual,
+        soc_residual=soc_residual,
+        assumptions=assumptions,
+        metadata=metadata,
+    )
+
+def validate_dispatch_result(
+    result: DispatchResult,
+    tolerance: float = 1e-8,
+) -> None:
+    """
+    Validate core physical and numerical invariants of a solved dispatch case.
+
+    Raises
+    ------
+    AssertionError
+        If any required invariant exceeds the specified tolerance.
+    """
+
+    max_balance_residual = np.max(
+        np.abs(result.balance_residual)
+    )
+
+    max_soc_residual = np.max(
+        np.abs(result.soc_residual)
+    )
+
+    if max_balance_residual > tolerance:
+        raise AssertionError(
+            "Energy balance validation failed: "
+            f"maximum residual = {max_balance_residual:.3e}, "
+            f"tolerance = {tolerance:.3e}"
+        )
+
+    if max_soc_residual > tolerance:
+        raise AssertionError(
+            "SOC dynamics validation failed: "
+            f"maximum residual = {max_soc_residual:.3e}, "
+            f"tolerance = {tolerance:.3e}"
+        )
+
+    if np.any(result.grid_import < -tolerance):
+        raise AssertionError(
+            "Grid import contains negative values."
+        )
+
+    if np.any(result.charge < -tolerance):
+        raise AssertionError(
+            "Battery charge contains negative values."
+        )
+
+    if np.any(result.discharge < -tolerance):
+        raise AssertionError(
+            "Battery discharge contains negative values."
+        )
+
+    if np.any(result.curtailment < -tolerance):
+        raise AssertionError(
+            "Curtailment contains negative values."
+        )
+
+    if np.any(result.solar_used < -tolerance):
+        raise AssertionError(
+            "Solar used contains negative values."
+        )
+
+    battery_capacity = result.assumptions[
+        "battery_capacity"
+    ]
+
+    battery_power = result.assumptions[
+        "battery_power"
+    ]
+
+    if np.any(result.soc < -tolerance):
+        raise AssertionError(
+            "State of charge falls below zero."
+        )
+
+    if np.any(
+        result.soc > battery_capacity + tolerance
+    ):
+        raise AssertionError(
+            "State of charge exceeds battery capacity."
+        )
+
+    if np.any(
+        result.charge > battery_power + tolerance
+    ):
+        raise AssertionError(
+            "Charge exceeds battery power limit."
+        )
+
+    if np.any(
+        result.discharge > battery_power + tolerance
+    ):
+        raise AssertionError(
+            "Discharge exceeds battery power limit."
+        )
 if __name__ == "__main__":
+   test_load = np.array(
+       [
+           10.0,
+           10.0,
+           10.0,
+           10.0,
+           10.0,
+           10.0,
+       ]
+   )
 
-    test_load = np.array([
-        10.0,
-        10.0,
-        10.0,
-        10.0,
-        10.0,
-        10.0,
-    ])
+   test_solar = np.array(
+       [
+           0.0,
+           0.0,
+           15.0,
+           15.0,
+           0.0,
+           0.0,
+       ]
+   )
 
-    test_solar = np.array([
-        0.0,
-        0.0,
-        15.0,
-        15.0,
-        0.0,
-        0.0,
-    ])
+   test_price = np.array(
+       [
+           0.10,
+           0.10,
+           0.15,
+           0.20,
+           0.50,
+           0.50,
+       ]
+   )
 
-    test_price = np.array([
-        0.10,
-        0.10,
-        0.15,
-        0.20,
-        0.50,
-        0.50,
-    ])
+   model = build_dispatch_model(
+       load=test_load,
+       solar=test_solar,
+       hourly_price=test_price,
+       battery_capacity=10.0,
+       battery_power=5.0,
+       battery_charge_efficiency=0.95,
+       battery_discharge_efficiency=0.95,
+       initial_soc=0.0,
+       degradation_rate=1e-9,
+   )
+   scipy_grid, scipy_curtailment, scipy_soc = optimize_battery_dispatch_scipy(
+       load=test_load,
+       hourly_price=test_price,
+       battery_capacity=10.0,
+       scaled_solar=test_solar,
+       battery_power_ratio=0.5,
+       battery_charge_efficiency=0.95,
+       battery_discharge_efficiency=0.95,
+   )
 
-    model = build_dispatch_model(
-        load=test_load,
-        solar=test_solar,
-        hourly_price=test_price,
-        battery_capacity=10.0,
-        battery_power=5.0,
-        battery_charge_efficiency=0.95,
-        battery_discharge_efficiency=0.95,
-        initial_soc=0.0,
-        degradation_rate=0.0,
+   results = solve_dispatch(model)
+   dispatch_results = extract_dispatch_results(model, results)
+   validate_dispatch_result(dispatch_results)
+   print("Validation passed: Dispatch results are physically consistent and within specified tolerances.")
+
+   print("Objective cost:", dispatch_results.objective_cost)
+   print("Grid cost:", dispatch_results.grid_cost)
+   print("Degradation cost:", dispatch_results.degradation_cost)
+   print(
+       "Max energy-balance residual:",
+       np.max(np.abs(dispatch_results.balance_residual)),
+   )
+   print(
+       "Max SOC residual:",
+       np.max(np.abs(dispatch_results.soc_residual)),
+   )
+   print("Solver status:", results.solver.status)
+   print("Termination:", results.solver.termination_condition)
+   print("Objective value:", pyo.value(model.objective))
+   print("\nHourly dispatch")
+   print("-" * 70)
+
+   for t in model.T:
+       print(
+           f"Hour {t}: "
+           f"grid={pyo.value(model.grid_import[t]):.3f}, "
+           f"solar_used={pyo.value(model.solar_used[t]):.3f}, "
+           f"charge={pyo.value(model.charge[t]):.3f}, "
+           f"discharge={pyo.value(model.discharge[t]):.3f}, "
+           f"curtailment={pyo.value(model.curtailment[t]):.3f}, "
+           f"soc={pyo.value(model.soc[t]):.3f}"
+       )
+
+   print(f"Final SOC: {pyo.value(model.soc[len(test_load)]):.3f}")
+   print("\nArray Shapes")
+   print("-" * 40)
+   print("Dispatch results shape:", dispatch_results.grid_import.shape)
+   print("SciPy results shape:", scipy_grid.shape)
+   print("Charge shape:", dispatch_results.charge.shape)
+
+   print("\nPyomo vs SciPy comparison")
+   print("-" * 40)
+
+   print(
+       "Grid max difference:",
+       np.max(np.abs(dispatch_results.grid_import - scipy_grid)),
+
+   )
+   print(
+         "Curtailment max difference:",
+         np.max(np.abs(dispatch_results.curtailment - scipy_curtailment)),
     )
+   print(
+         "SOC max difference:",
+        np.max(
+            np.abs(
+                dispatch_results.soc
+                -scipy_soc
+            )))       
 
-    results = solve_dispatch(model)
-
-    print(
-        "Solver status:",
-        results.solver.status
-    )
-
-    print(
-        "Termination:",
-        results.solver.termination_condition
-    )
-
-    print(
-        "Objective value:",
-        pyo.value(model.objective)
-    )
-print("\nHourly dispatch")
-print("-" * 70)
-
-for t in model.T:
-    print(
-        f"Hour {t}: "
-        f"grid={pyo.value(model.grid_import[t]):.3f}, "
-        f"solar_used={pyo.value(model.solar_used[t]):.3f}, "
-        f"charge={pyo.value(model.charge[t]):.3f}, "
-        f"discharge={pyo.value(model.discharge[t]):.3f}, "
-        f"curtailment={pyo.value(model.curtailment[t]):.3f}, "
-        f"soc={pyo.value(model.soc[t]):.3f}"
-    )
-
-print(
-    f"Final SOC: "
-    f"{pyo.value(model.soc[len(test_load)]):.3f}"
-)
-
+        
+        
+   
 
 
