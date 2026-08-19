@@ -1,4 +1,59 @@
 import numpy as np
+import pytest
+
+def test_rejects_mismatched_time_series():
+    with pytest.raises(ValueError):
+        build_dispatch_model(
+            load=np.array([10.0, 10.0]),
+            solar=np.array([5.0]),
+            hourly_price=np.array([0.20, 0.20]),
+            battery_capacity=10.0,
+            battery_power=5.0,
+            battery_charge_efficiency=0.95,
+            battery_discharge_efficiency=0.95,
+
+        )
+
+def test_rejects_invalid_efficiency_values():
+    with pytest.raises(ValueError):
+        build_dispatch_model(
+            load=np.array([10.0]),
+            solar=np.array([0.0]),
+            hourly_price=np.array([0.20]),
+            battery_capacity=10.0,
+            battery_power=5.0,
+            battery_charge_efficiency=1.10,
+            battery_discharge_efficiency=0.95,
+        )
+
+def test_rejects_invalid_initial_soc():
+    with pytest.raises(ValueError):
+        build_dispatch_model(
+            load=np.array([10.0]),
+            solar=np.array([0.0]),
+            hourly_price=np.array([0.20]),
+            battery_capacity=10.0,
+            battery_power=5.0,
+            battery_charge_efficiency=0.95,
+            battery_discharge_efficiency=0.95,
+            initial_soc=20.0,
+        )
+
+def test_unavailable_solver_fails_gracefully():
+    model = build_dispatch_model(
+        load=np.array([10.0]),
+        solar=np.array([0.0]),
+        hourly_price=np.array([0.20]),
+        battery_capacity=0.0,
+        battery_power=0.0,
+        battery_charge_efficiency=0.95,
+        battery_discharge_efficiency=0.95,
+    )
+    with pytest.raises(RuntimeError):
+        solve_dispatch(
+            model, 
+            solver_name="definitely_not_a_real_solver",
+        )
 
 from optimization import (
     build_dispatch_model,
@@ -164,3 +219,122 @@ def test_zero_battery_collapses_to_grid_solar_accounting():
         expected_curtailment, 
         atol=1e-8,
     )
+
+def test_zero_solar_uses_grid_and_storage_only():
+    load = np.array([
+        10.0, 
+        10.0,
+        10.0,
+        10.0,
+    ])
+
+    solar = np.zeros(4)
+
+    price = np.array([
+        0.10,
+        0.10,
+        0.50,
+        0.50,
+    ])
+    result = solve_test_case(
+        load=load,
+        solar=solar,
+        hourly_price=price,
+        battery_capacity=10.0,
+        battery_power=5.0,
+        degradation_rate=1e-9,
+    )
+    np.testing.assert_allclose(
+        result.solar_used, 
+        0.0,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        result.curtailment,
+        0.0,
+        atol=1e-8,
+    )
+    assert np.all(
+        result.grid_import >= -1.e-8
+
+    )
+    assert np.all(
+        np.sum(result.discharge) > 0.0
+    )
+
+def test_flat_price_discourages_unnecessary_battery_cycles():
+    load = np.array([
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+    ])
+
+    solar = np.zeros(4)
+
+    price = np.array([
+        0.20,
+        0.20,
+        0.20,
+        0.20,
+    ])
+    result = solve_test_case(
+        load=load,
+        solar=solar,
+        hourly_price=price,
+        battery_capacity=10.0,
+        battery_power=5.0,
+        degradation_rate=1e-9,
+    )
+    np.testing.assert_allclose(
+        result.charge,
+        0.0,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        result.discharge,
+        0.0,
+        atol=1e-8,
+    )  
+    np.testing.assert_allclose(
+        result.soc,
+        0.0,
+        atol=1e-8,
+    )
+
+def test_high_degradation_reduces_battery_throughput():
+    load = np.array([
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+    ])
+
+    solar = np.zeros(4)
+
+    price = np.array([
+        0.10,
+        0.10,
+        0.50,
+        0.50,
+    ])
+    low_deg_result = solve_test_case(
+        load=load,
+        solar=solar,
+        hourly_price=price,
+        battery_capacity=10.0,
+        battery_power=5.0,
+        degradation_rate=1e-9,
+    )
+    high_deg_result = solve_test_case(
+        load=load,
+        solar=solar,
+        hourly_price=price,
+        battery_capacity=10.0,
+        battery_power=5.0,
+        degradation_rate=1.00,  
+    )
+    low_throughput = np.sum(low_deg_result.charge) + np.sum(low_deg_result.discharge)
+    high_throughput = np.sum(high_deg_result.charge) + np.sum(high_deg_result.discharge)
+    assert high_throughput < low_throughput - 1e-8
+    

@@ -326,7 +326,14 @@ def solve_dispatch(
             """
     solver = pyo.SolverFactory(solver_name)
 
-    if not solver.available():
+    try:
+        available = solver.available()
+    except Exception as exc:
+        # Normalize Pyomo's lower-level exceptions to a RuntimeError so callers
+        # can handle solver-unavailability uniformly (tests expect RuntimeError).
+        raise RuntimeError(f"Solver '{solver_name}' is not available. Please ensure it is installed and accessible.") from exc
+
+    if not available:
         raise RuntimeError(f"Solver '{solver_name}' is not available. Please ensure it is installed and accessible.")
     results = solver.solve(model, tee=True)
 
