@@ -1,5 +1,3 @@
-from pyexpat import model
-
 import numpy as np
 import pyomo.environ as pyo
 from scipy.optimize import linprog
@@ -145,7 +143,9 @@ def build_dispatch_model(
         solar: np.ndarray,
         battery_power: float,
         battery_charge_efficiency: float,
-        battery_discharge_efficiency: float
+battery_discharge_efficiency: float,
+        initial_soc: float = 0.0,
+        degradation_rate: float = 0.0,
 ):
     # Time series inputs are converted to float arrays to ensure compatibility with Pyomo's data handling.
     load = np.asarray(load, dtype=float)
@@ -173,6 +173,10 @@ def build_dispatch_model(
     if not (0 < battery_discharge_efficiency <= 1):
         raise ValueError("Battery discharge efficiency must be > 0 and <= 1.")
 
+    if not (0 <= initial_soc <= battery_capacity):
+        raise ValueError("Initial state of charge must be between 0 and battery capacity.")
+    if degradation_rate < 0:
+        raise ValueError("Degradation rate must be non-negative.")
     # Horizon length
     number_of_hours = len(load)
 
@@ -182,12 +186,12 @@ def build_dispatch_model(
     model.T_SOC = pyo.RangeSet(0, number_of_hours)
 
     # Time-varying parameters
-    model.load = pyo.Param(
+    model.demand = pyo.Param(
         model.T,
         initialize={t: float(load[t]) for t in range(number_of_hours)},
     )
 
-    model.solar = pyo.Param(
+    model.solar_profile = pyo.Param(
         model.T,
         initialize={t: float(solar[t]) for t in range(number_of_hours)},
     )
@@ -202,7 +206,64 @@ def build_dispatch_model(
     model.battery_power = pyo.Param(initialize=float(battery_power))
     model.battery_charge_efficiency = pyo.Param(initialize=float(battery_charge_efficiency))
     model.battery_discharge_efficiency = pyo.Param(initialize=float(battery_discharge_efficiency))
+    model.degradation_rate = pyo.Param(initialize=float(degradation_rate))
+    # Decision variables
+    model.grid_import = pyo.Var(model.T, domain=pyo.NonNegativeReals)
+    model.charge = pyo.Var(model.T, domain=pyo.NonNegativeReals)
+    model.discharge = pyo.Var(model.T, domain=pyo.NonNegativeReals)
+    model.curtailment = pyo.Var(model.T, domain=pyo.NonNegativeReals)
+    model.soc = pyo.Var(model.T_SOC, domain=pyo.NonNegativeReals)
+    model.initial_soc = pyo.Param(initialize=float(initial_soc), mutable=True)
+    # Energy balance constraint
+    def energy_balance_rule(model, t):
+        return (
+            model.grid_import[t]
+            - model.charge[t]
+            + model.discharge[t]
+            - model.curtailment[t]
+            == model.demand[t] - model.solar_profile[t]
+        )
 
+    model.energy_balance = pyo.Constraint(model.T, rule=energy_balance_rule)
+    # Battery state of charge dynamics
+    def soc_dynamics_rule(model, t):
+        return (
+            model.soc[t + 1]
+            == model.soc[t]
+            + model.battery_charge_efficiency * model.charge[t]
+            - (1 / model.battery_discharge_efficiency) * model.discharge[t]
+        )
+    model.soc_dynamics = pyo.Constraint(
+        model.T, rule=soc_dynamics_rule)
+    model.initial_soc_constraint = pyo.Constraint(
+        expr=model.soc[0] == model.initial_soc)
+    # Battery capacity constraint
+    model.terminal_soc_constraint = pyo.Constraint(
+        expr=model.soc[number_of_hours] == model.soc[0])
+    model.battery_capacity_constraint = pyo.Constraint(
+        model.T_SOC, rule=lambda model, t: model.soc[t] <= model.battery_capacity
+    )
+    # Battery power constraints
+    model.battery_power_constraint_charge = pyo.Constraint(
+        model.T, rule=lambda model, t: model.charge[t] <= model.battery_power
+    )
+    model.battery_power_constraint_discharge = pyo.Constraint(
+        model.T, rule=lambda model, t: model.discharge[t] <= model.battery_power
+    )
+    # Curtailment constraint
+    model.curtailment_constraint = pyo.Constraint(
+        model.T, rule=lambda model, t: model.curtailment[t] <= model.solar_profile[t]
+    )
+    # Objective function: Minimize total cost of grid import
+    def objective_rule(model):
+        grid_cost = sum(model.hourly_price[t] * model.grid_import[t] for t in model.T)
+        degradation_cost = sum(
+            model.degradation_rate * (model.charge[t] + model.discharge[t]) 
+            for t in model.T
+        )
+        return grid_cost + degradation_cost
+    model.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
+    
     return model
 
 
