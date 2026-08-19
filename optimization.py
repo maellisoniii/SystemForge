@@ -1,3 +1,5 @@
+from xml.parsers.expat import model
+
 import numpy as np
 import pyomo.environ as pyo
 from scipy.optimize import linprog
@@ -212,18 +214,17 @@ battery_discharge_efficiency: float,
     model.charge = pyo.Var(model.T, domain=pyo.NonNegativeReals)
     model.discharge = pyo.Var(model.T, domain=pyo.NonNegativeReals)
     model.curtailment = pyo.Var(model.T, domain=pyo.NonNegativeReals)
+    model.solar_used = pyo.Var(model.T, domain=pyo.NonNegativeReals)
     model.soc = pyo.Var(model.T_SOC, domain=pyo.NonNegativeReals)
     model.initial_soc = pyo.Param(initialize=float(initial_soc), mutable=True)
     # Energy balance constraint
     def energy_balance_rule(model, t):
         return (
             model.grid_import[t]
-            - model.charge[t]
+            + model.solar_used[t]
             + model.discharge[t]
-            - model.curtailment[t]
-            == model.demand[t] - model.solar_profile[t]
+            == model.demand[t] + model.charge[t]
         )
-
     model.energy_balance = pyo.Constraint(model.T, rule=energy_balance_rule)
     # Battery state of charge dynamics
     def soc_dynamics_rule(model, t):
@@ -240,10 +241,13 @@ battery_discharge_efficiency: float,
     # Battery capacity constraint
     model.terminal_soc_constraint = pyo.Constraint(
         expr=model.soc[number_of_hours] == model.soc[0])
-    model.battery_capacity_constraint = pyo.Constraint(
-        model.T_SOC, rule=lambda model, t: model.soc[t] <= model.battery_capacity
-    )
+    def charge_power_constraint_rule(model, t):
+        return model.charge[t] <= model.battery_power
+    model.charge_power_constraint = pyo.Constraint(
+        model.T, rule=charge_power_constraint_rule)
     # Battery power constraints
+    def discharge_power_constraint_rule(model, t):
+        return model.discharge[t] <= model.battery_power
     model.battery_power_constraint_charge = pyo.Constraint(
         model.T, rule=lambda model, t: model.charge[t] <= model.battery_power
     )
@@ -251,8 +255,11 @@ battery_discharge_efficiency: float,
         model.T, rule=lambda model, t: model.discharge[t] <= model.battery_power
     )
     # Curtailment constraint
-    model.curtailment_constraint = pyo.Constraint(
-        model.T, rule=lambda model, t: model.curtailment[t] <= model.solar_profile[t]
+    def solar_allocation_rule(model, t):
+        return model.solar_used[t] + model.curtailment[t] <= model.solar_profile[t]
+    model.solar_allocation_constraint = pyo.Constraint(
+        model.T, 
+        rule=solar_allocation_rule
     )
     # Objective function: Minimize total cost of grid import
     def objective_rule(model):
@@ -263,8 +270,116 @@ battery_discharge_efficiency: float,
         )
         return grid_cost + degradation_cost
     model.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
-    
     return model
+    
+
+def solve_dispatch(
+        model: pyo.ConcreteModel,
+        solver_name: str = "highs",
+):
+    """
+    Solve a previously contructed SystemForge dispatch model.
+    Parameters 
+    ----------
+    model: 
+        A Pyomo ConcreteModel returned by build_dispatch_model.
+        solver_name:
+            Name of the optimization solver to use. Defaults to "highs" (HiGHS solver).
+            Returns
+            Pyomo solver results object containing the solution and solver information.
+            """
+    solver = pyo.SolverFactory(solver_name)
+
+    if not solver.available():
+        raise RuntimeError(f"Solver '{solver_name}' is not available. Please ensure it is installed and accessible.")
+    results = solver.solve(model, tee=True)
+
+    solver_status = results.solver.status
+    termination_condition = (results.solver.termination_condition
+    )
+    if solver_status != pyo.SolverStatus.ok:
+        raise RuntimeError("Dispatch optimization failed with solver status: "
+            f"Solver failed with status: {solver_status}")
+    if termination_condition != pyo.TerminationCondition.optimal:
+        raise RuntimeError("Dispatch optimization did not terminate optimally. "
+            f"Termination condition: {termination_condition}")
+    return results
+
+if __name__ == "__main__":
+
+    test_load = np.array([
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+    ])
+
+    test_solar = np.array([
+        0.0,
+        0.0,
+        15.0,
+        15.0,
+        0.0,
+        0.0,
+    ])
+
+    test_price = np.array([
+        0.10,
+        0.10,
+        0.15,
+        0.20,
+        0.50,
+        0.50,
+    ])
+
+    model = build_dispatch_model(
+        load=test_load,
+        solar=test_solar,
+        hourly_price=test_price,
+        battery_capacity=10.0,
+        battery_power=5.0,
+        battery_charge_efficiency=0.95,
+        battery_discharge_efficiency=0.95,
+        initial_soc=0.0,
+        degradation_rate=0.0,
+    )
+
+    results = solve_dispatch(model)
+
+    print(
+        "Solver status:",
+        results.solver.status
+    )
+
+    print(
+        "Termination:",
+        results.solver.termination_condition
+    )
+
+    print(
+        "Objective value:",
+        pyo.value(model.objective)
+    )
+print("\nHourly dispatch")
+print("-" * 70)
+
+for t in model.T:
+    print(
+        f"Hour {t}: "
+        f"grid={pyo.value(model.grid_import[t]):.3f}, "
+        f"solar_used={pyo.value(model.solar_used[t]):.3f}, "
+        f"charge={pyo.value(model.charge[t]):.3f}, "
+        f"discharge={pyo.value(model.discharge[t]):.3f}, "
+        f"curtailment={pyo.value(model.curtailment[t]):.3f}, "
+        f"soc={pyo.value(model.soc[t]):.3f}"
+    )
+
+print(
+    f"Final SOC: "
+    f"{pyo.value(model.soc[len(test_load)]):.3f}"
+)
 
 
 
