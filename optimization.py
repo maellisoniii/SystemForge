@@ -172,6 +172,8 @@ def build_dispatch_model(
         initial_soc: float = 0.0,
         degradation_rate: float = 0.0,
 ):
+
+
     # Time series inputs are converted to float arrays to ensure compatibility with Pyomo's data handling.
     load = np.asarray(load, dtype=float)
     solar = np.asarray(solar, dtype=float)
@@ -307,7 +309,287 @@ def build_dispatch_model(
         return grid_cost + degradation_cost
     model.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
     return model
-    
+
+def build_capacity_model(
+        load:np.ndarray,
+        solar_capacity_factor: np.ndarray,
+        hourly_price: np.ndarray,
+        battery_charge_efficiency: float, 
+        battery_discharge_efficiency: float, 
+        solar_capacity_cost: float,
+        battery_energy_cost: float, 
+        battery_power_cost: float, 
+        degradation_rate: float = 0.0
+):
+    """ Build a continuous capacity + dispatch co-optimization model
+    The model jointly chooses:
+    - solar capacity
+    - battery energy capacity
+    - hourly grid import
+    - solar use and curtailment
+    - battery charge/discharge
+    - battery state of charge 
+    All capacity decisions are continuous"""
+    # Normalize and validate the capacity model
+    load = np.asarray(load, dtype=float)
+    solar_capacity_factor = np.asarray(
+        solar_capacity_factor,
+        dtype=float,
+    )
+    hourly_price = np.asarray(
+        hourly_price,
+        dtype=float,
+    )
+
+    if not (
+        len(load)
+        == len(solar_capacity_factor)
+        == len(hourly_price)
+    ):
+        raise ValueError(
+            "Load, solar capacity factor, and hourly price "
+            "must have the same length."
+        )
+
+    if len(load) == 0:
+        raise ValueError(
+            "Capacity optimization horizon cannot be empty."
+        )
+
+    if not 0 < battery_charge_efficiency <= 1:
+        raise ValueError(
+            "Battery charge efficiency must be > 0 and <= 1."
+        )
+
+    if not 0 < battery_discharge_efficiency <= 1:
+        raise ValueError(
+            "Battery discharge efficiency must be > 0 and <= 1."
+        )
+
+    if np.any(solar_capacity_factor < 0):
+        raise ValueError(
+            "Solar capacity factor cannot be negative."
+        )
+
+    if np.any(solar_capacity_factor > 1):
+        raise ValueError(
+            "Solar capacity factor cannot exceed 1."
+        )
+
+    if solar_capacity_cost < 0:
+        raise ValueError(
+            "Solar capacity cost cannot be negative."
+        )
+
+    if battery_energy_cost < 0:
+        raise ValueError(
+            "Battery energy cost cannot be negative."
+        )
+
+    if battery_power_cost < 0:
+        raise ValueError(
+            "Battery power cost cannot be negative."
+        )
+
+    if degradation_rate < 0:
+        raise ValueError(
+            "Degradation rate cannot be negative."
+        )
+    # New model and sets
+    number_of_hours = len(load)
+
+    model = pyo.ConcreteModel(
+        name="Capacity_Cooptimization"
+    )
+
+    model.T = pyo.RangeSet(
+        0,
+        number_of_hours - 1
+    )
+
+    model.T_SOC = pyo.RangeSet(
+        0,
+        number_of_hours
+    )
+    # Parameters 
+    model.demand = pyo.Param(
+        model.T,
+        initialize={
+            t: float(load[t])
+            for t in range(number_of_hours)
+        },
+    )
+
+    model.solar_capacity_factor = pyo.Param(
+        model.T,
+        initialize={
+            t: float(solar_capacity_factor[t])
+            for t in range(number_of_hours)
+        },
+    )
+
+    model.hourly_price = pyo.Param(
+        model.T,
+        initialize={
+            t: float(hourly_price[t])
+            for t in range(number_of_hours)
+        },
+    )
+
+    model.battery_charge_efficiency = pyo.Param(
+        initialize=float(
+            battery_charge_efficiency
+        )
+    )
+
+    model.battery_discharge_efficiency = pyo.Param(
+        initialize=float(
+            battery_discharge_efficiency
+        )
+    )
+
+    model.solar_capacity_cost = pyo.Param(
+        initialize=float(solar_capacity_cost)
+    )
+
+    model.battery_energy_cost = pyo.Param(
+        initialize=float(battery_energy_cost)
+    )
+
+    model.battery_power_cost = pyo.Param(
+        initialize=float(battery_power_cost)
+    )
+
+    model.degradation_rate = pyo.Param(
+        initialize=float(degradation_rate)
+    )
+    # Decision (design) variables 
+    # First-stage infrastructure design decisions
+    model.solar_capacity = pyo.Var(
+        domain=pyo.NonNegativeReals
+    )
+
+    model.battery_capacity = pyo.Var(
+        domain=pyo.NonNegativeReals
+    )
+
+    model.battery_power = pyo.Var(
+        domain=pyo.NonNegativeReals
+    )
+    # Operational variables 
+    # Operational decisions
+    model.grid_import = pyo.Var(
+        model.T,
+        domain=pyo.NonNegativeReals
+    )
+
+    model.charge = pyo.Var(
+        model.T,
+        domain=pyo.NonNegativeReals
+    )
+
+    model.discharge = pyo.Var(
+        model.T,
+        domain=pyo.NonNegativeReals
+    )
+
+    model.solar_used = pyo.Var(
+        model.T,
+        domain=pyo.NonNegativeReals
+    )
+
+    model.curtailment = pyo.Var(
+        model.T,
+        domain=pyo.NonNegativeReals
+    )
+
+    model.soc = pyo.Var(
+        model.T_SOC,
+        domain=pyo.NonNegativeReals
+    )
+    # Physical Limits 
+    def energy_balance_rule(model, t):
+        return (
+            model.grid_import[t]
+            + model.solar_used[t]
+            + model.discharge[t]
+            ==
+            model.demand[t]
+            + model.charge[t]
+        )
+
+    model.energy_balance = pyo.Constraint(
+        model.T,
+        rule=energy_balance_rule
+    )
+    def soc_dynamics_rule(model, t):
+        return (
+            model.soc[t + 1]
+            ==
+            model.soc[t]
+            + model.battery_charge_efficiency
+            * model.charge[t]
+            - model.discharge[t]
+            / model.battery_discharge_efficiency
+        )
+
+    model.soc_dynamics = pyo.Constraint(
+        model.T,
+        rule=soc_dynamics_rule
+    )
+    def soc_capacity_rule(model, t):
+        return (
+            model.soc[t]
+            <= model.battery_capacity
+        )
+
+    model.soc_capacity_constraint = pyo.Constraint(
+        model.T_SOC,
+        rule=soc_capacity_rule
+    )
+    def charge_power_rule(model, t):
+        return (
+            model.charge[t]
+            <= model.battery_power
+        )
+
+    model.charge_power_constraint = pyo.Constraint(
+        model.T,
+        rule=charge_power_rule
+    )
+    def discharge_power_rule(model, t):
+        return (
+            model.discharge[t]
+            <= model.battery_power
+        )
+
+    model.discharge_power_constraint = pyo.Constraint(
+        model.T,
+        rule=discharge_power_rule
+    )
+    # Capacity dependent solar
+    def solar_allocation_rule(model, t):
+        return (
+            model.solar_used[t]
+            + model.curtailment[t]
+            ==
+            model.solar_capacity
+            * model.solar_capacity_factor[t]
+        )
+
+    model.solar_allocation = pyo.Constraint(
+        model.T,
+        rule=solar_allocation_rule
+    )
+    # Initial and terminal SOC
+    model.initial_soc_constraint = pyo.Constraint(
+        expr=model.soc[0] == 0.0
+    )
+
+    model.terminal_soc_constraint = pyo.Constraint(
+        expr=model.soc[number_of_hours]
+        == model.soc[0]
+    )
 
 def solve_dispatch(
         model: pyo.ConcreteModel,
@@ -326,14 +608,7 @@ def solve_dispatch(
             """
     solver = pyo.SolverFactory(solver_name)
 
-    try:
-        available = solver.available()
-    except Exception as exc:
-        # Normalize Pyomo's lower-level exceptions to a RuntimeError so callers
-        # can handle solver-unavailability uniformly (tests expect RuntimeError).
-        raise RuntimeError(f"Solver '{solver_name}' is not available. Please ensure it is installed and accessible.") from exc
-
-    if not available:
+    if not solver.available():
         raise RuntimeError(f"Solver '{solver_name}' is not available. Please ensure it is installed and accessible.")
     results = solver.solve(model, tee=True)
 
