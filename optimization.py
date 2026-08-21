@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
+from pyomo.common.errors import ApplicationError 
 
 import numpy as np
 import pyomo.environ as pyo
@@ -24,6 +25,30 @@ class DispatchResult:
 
     balance_residual: np.ndarray
     soc_residual: np.ndarray
+
+    assumptions: dict[str, Any]
+    metadata: dict[str, Any]
+
+@dataclass
+class CapacityResult:
+    solver_status: str
+    termination_condition: str
+    objective_cost: float
+
+    solar_capacity: float
+    battery_capacity: float
+    battery_power: float
+
+    capital_cost: float
+    grid_cost: float
+    degradation_cost: float
+
+    grid_import: np.ndarray
+    charge: np.ndarray
+    discharge: np.ndarray
+    solar_used: np.ndarray
+    curtailment: np.ndarray
+    soc: np.ndarray
 
     assumptions: dict[str, Any]
     metadata: dict[str, Any]
@@ -309,7 +334,39 @@ def build_dispatch_model(
         return grid_cost + degradation_cost
     model.objective = pyo.Objective(rule=objective_rule, sense=pyo.minimize)
     return model
+# Investment (Front End)
+def capital_recovery_factor(
+        discount_rate: float,
+        lifetime_years: int, 
+) -> float:
+    """ 
+    Convert an upfront capital cost into an equivalent annual payment factor. 
 
+    Parameters
+    --
+    discount_rate:
+        Annual discount rate as a decimal.
+
+    lifetime_years:
+        Economic lifetime of the asset in years.
+
+    """
+    ## Come back to this -- Mark
+    if discount_rate < 0: 
+        raise ValueError(
+            "Discount rate cannot be negative."
+        )
+    if lifetime_years <= 0:
+        raise ValueError(
+            "Lifetime must be greater than zero."
+        )
+    if discount_rate == 0:
+        return 1.0 / lifetime_years
+    growth = (1 + discount_rate) ** lifetime_years
+    return (
+        discount_rate * growth
+        / (growth -1)
+    )
 def build_capacity_model(
         load:np.ndarray,
         solar_capacity_factor: np.ndarray,
@@ -319,6 +376,9 @@ def build_capacity_model(
         solar_capacity_cost: float,
         battery_energy_cost: float, 
         battery_power_cost: float, 
+        discount_rate: float,
+        solar_lifetime_years: int,
+        battery_lifetime_years: int,
         degradation_rate: float = 0.0
 ):
     """ Build a continuous capacity + dispatch co-optimization model
@@ -395,6 +455,18 @@ def build_capacity_model(
         raise ValueError(
             "Degradation rate cannot be negative."
         )
+    if discount_rate < 0:
+        raise ValueError(
+            "Discount rate cannot be negative."
+        )
+    if solar_lifetime_years <= 0:
+        raise ValueError(
+            "Solar lifetime must be greater than zero"
+        )
+    if battery_lifetime_years <= 0:
+        raise ValueError(
+            "Battery lifetime must be greater than zero."
+        )
     # New model and sets
     number_of_hours = len(load)
 
@@ -411,6 +483,28 @@ def build_capacity_model(
         0,
         number_of_hours
     )
+    # Annualized costs 
+    solar_crf = capital_recovery_factor(
+        discount_rate, 
+        solar_lifetime_years
+    )
+    battery_crf = capital_recovery_factor(
+        discount_rate,
+        battery_lifetime_years
+    )
+    annualized_solar_capacity_cost = (
+        solar_capacity_cost * solar_crf
+    )
+    annualized_battery_energy_cost = (
+        battery_energy_cost * battery_crf
+    )
+    annualized_battery_power_cost = (
+        battery_power_cost * battery_crf
+    )
+    # Assumption
+    operating_cost_scale = (
+        8760.0 / number_of_hours
+    )
     # Parameters 
     model.demand = pyo.Param(
         model.T,
@@ -419,13 +513,18 @@ def build_capacity_model(
             for t in range(number_of_hours)
         },
     )
-
     model.solar_capacity_factor = pyo.Param(
         model.T,
         initialize={
             t: float(solar_capacity_factor[t])
             for t in range(number_of_hours)
         },
+    )
+
+    model.annualized_solar_capacity_cost = pyo.Param(
+        initialize=float(
+            annualized_solar_capacity_cost
+        )
     )
 
     model.hourly_price = pyo.Param(
@@ -452,16 +551,26 @@ def build_capacity_model(
         initialize=float(solar_capacity_cost)
     )
 
-    model.battery_energy_cost = pyo.Param(
-        initialize=float(battery_energy_cost)
+    model.annualized_battery_energy_cost = pyo.Param(
+        initialize=float(
+            annualized_battery_energy_cost
+        )
     )
 
-    model.battery_power_cost = pyo.Param(
-        initialize=float(battery_power_cost)
+    model.annualized_battery_power_cost = pyo.Param(
+        initialize=float(
+            annualized_battery_power_cost
+        )
     )
 
     model.degradation_rate = pyo.Param(
         initialize=float(degradation_rate)
+    )
+
+    model.operating_cost_scale = pyo.Param(
+        initialize=float(
+            operating_cost_scale
+        )
     )
     # Decision (design) variables 
     # First-stage infrastructure design decisions
@@ -591,6 +700,42 @@ def build_capacity_model(
         == model.soc[0]
     )
 
+    def objective_rule(model):
+        capital_cost = (
+            model.annualized_solar_capacity_cost
+            * model.solar_capacity
+            + model.annualized_battery_energy_cost
+            * model.battery_capacity
+            + model.annualized_battery_power_cost
+            * model.battery_power
+        )
+        grid_cost = model.operating_cost_scale * sum(
+            model.hourly_price[t]
+            * model.grid_import[t]
+            for t in model.T
+        )
+        degradation_cost = (
+            model.operating_cost_scale
+            * sum(
+                model.degradation_rate
+                * (
+                    model.charge[t]
+                    + model.discharge[t]
+                )
+                for t in model.T
+            )
+        )
+        return (
+            capital_cost
+            + grid_cost
+            + degradation_cost
+        )
+        model.objective = pyo.Objective(
+        rule=objective_rule,
+        sense=pyo.minimize,
+    )
+        return model
+
 def solve_dispatch(
         model: pyo.ConcreteModel,
         solver_name: str = "highs",
@@ -606,11 +751,17 @@ def solve_dispatch(
             Returns
             Pyomo solver results object containing the solution and solver information.
             """
-    solver = pyo.SolverFactory(solver_name)
+    try:
+        solver = pyo.SolverFactory(solver_name)
 
-    if not solver.available():
-        raise RuntimeError(f"Solver '{solver_name}' is not available. Please ensure it is installed and accessible.")
-    results = solver.solve(model, tee=True)
+        if not solver.available():
+            raise RuntimeError(f"Solver '{solver_name}' is not available. Please ensure it is installed and accessible."
+                               )
+    except (ApplicationError, ValueError) as exc:
+        raise RuntimeError(
+            f"Solver '{solver_name}' is not available."
+        ) from exc
+    results = solver.solve(model)
 
     solver_status = results.solver.status
     termination_condition = (results.solver.termination_condition
@@ -691,6 +842,146 @@ def extract_dispatch_results(
         soc_residual=soc_residual,
         assumptions=assumptions,
         metadata=metadata,
+    )
+
+def extract_capacity_results(
+    model: pyo.ConcreteModel,
+    results: pyo.SolverResults,
+) -> CapacityResult:
+
+    time_steps = list(model.T)
+    soc_steps = list(model.T_SOC)
+
+    grid_import = np.array([
+        pyo.value(model.grid_import[t])
+        for t in time_steps
+    ])
+
+    charge = np.array([
+        pyo.value(model.charge[t])
+        for t in time_steps
+    ])
+
+    discharge = np.array([
+        pyo.value(model.discharge[t])
+        for t in time_steps
+    ])
+
+    solar_used = np.array([
+        pyo.value(model.solar_used[t])
+        for t in time_steps
+    ])
+
+    curtailment = np.array([
+        pyo.value(model.curtailment[t])
+        for t in time_steps
+    ])
+
+    soc = np.array([
+        pyo.value(model.soc[t])
+        for t in soc_steps
+    ])
+
+    solar_capacity = pyo.value(
+        model.solar_capacity
+    )
+
+    battery_capacity = pyo.value(
+        model.battery_capacity
+    )
+
+    battery_power = pyo.value(
+        model.battery_power
+    )
+    capital_cost = (
+        pyo.value(
+            model.annualized_solar_capacity_cost
+        )
+        * solar_capacity
+        + pyo.value(
+            model.annualized_battery_energy_cost
+        )
+        * battery_capacity
+        + pyo.value(
+            model.annualized_battery_power_cost
+        )
+        * battery_power
+    )
+
+    grid_cost = (
+        pyo.value(model.operating_cost_scale)
+        * sum(
+            pyo.value(model.hourly_price[t])
+            * grid_import[t]
+            for t in time_steps
+        )
+    )
+
+    degradation_cost = (
+        pyo.value(model.operating_cost_scale)
+        * pyo.value(model.degradation_rate)
+        * np.sum(
+            charge + discharge
+        )
+    )
+
+    objective_cost = pyo.value(
+        model.objective
+    )
+    return CapacityResult(
+        solver_status=str(
+            results.solver.status
+        ),
+        termination_condition=str(
+            results.solver.termination_condition
+        ),
+        objective_cost=float(
+            objective_cost
+        ),
+        solar_capacity=float(
+            solar_capacity
+        ),
+        battery_capacity=float(
+            battery_capacity
+        ),
+        battery_power=float(
+            battery_power
+        ),
+        capital_cost=float(
+            capital_cost
+        ),
+        grid_cost=float(
+            grid_cost
+        ),
+        degradation_cost=float(
+            degradation_cost
+        ),
+        grid_import=grid_import,
+        charge=charge,
+        discharge=discharge,
+        solar_used=solar_used,
+        curtailment=curtailment,
+        soc=soc,
+        assumptions={
+            "operating_cost_scale":
+                pyo.value(
+                    model.operating_cost_scale
+                ),
+            "charge_efficiency":
+                pyo.value(
+                    model.battery_charge_efficiency
+                ),
+            "discharge_efficiency":
+                pyo.value(
+                    model.battery_discharge_efficiency
+                ),
+        },
+        metadata={
+            "number_of_hours":
+                len(time_steps),
+            "model_name":
+                model.name,
+        },
     )
 
 def validate_dispatch_result(
@@ -786,123 +1077,4 @@ def validate_dispatch_result(
         raise AssertionError(
             "Discharge exceeds battery power limit."
         )
-if __name__ == "__main__":
-   test_load = np.array(
-       [
-           10.0,
-           10.0,
-           10.0,
-           10.0,
-           10.0,
-           10.0,
-       ]
-   )
-
-   test_solar = np.array(
-       [
-           0.0,
-           0.0,
-           15.0,
-           15.0,
-           0.0,
-           0.0,
-       ]
-   )
-
-   test_price = np.array(
-       [
-           0.10,
-           0.10,
-           0.15,
-           0.20,
-           0.50,
-           0.50,
-       ]
-   )
-
-   model = build_dispatch_model(
-       load=test_load,
-       solar=test_solar,
-       hourly_price=test_price,
-       battery_capacity=10.0,
-       battery_power=5.0,
-       battery_charge_efficiency=0.95,
-       battery_discharge_efficiency=0.95,
-       initial_soc=0.0,
-       degradation_rate=1e-9,
-   )
-   scipy_grid, scipy_curtailment, scipy_soc = optimize_battery_dispatch_scipy(
-       load=test_load,
-       hourly_price=test_price,
-       battery_capacity=10.0,
-       scaled_solar=test_solar,
-       battery_power_ratio=0.5,
-       battery_charge_efficiency=0.95,
-       battery_discharge_efficiency=0.95,
-   )
-
-   results = solve_dispatch(model)
-   dispatch_results = extract_dispatch_results(model, results)
-   validate_dispatch_result(dispatch_results)
-   print("Validation passed: Dispatch results are physically consistent and within specified tolerances.")
-
-   print("Objective cost:", dispatch_results.objective_cost)
-   print("Grid cost:", dispatch_results.grid_cost)
-   print("Degradation cost:", dispatch_results.degradation_cost)
-   print(
-       "Max energy-balance residual:",
-       np.max(np.abs(dispatch_results.balance_residual)),
-   )
-   print(
-       "Max SOC residual:",
-       np.max(np.abs(dispatch_results.soc_residual)),
-   )
-   print("Solver status:", results.solver.status)
-   print("Termination:", results.solver.termination_condition)
-   print("Objective value:", pyo.value(model.objective))
-   print("\nHourly dispatch")
-   print("-" * 70)
-
-   for t in model.T:
-       print(
-           f"Hour {t}: "
-           f"grid={pyo.value(model.grid_import[t]):.3f}, "
-           f"solar_used={pyo.value(model.solar_used[t]):.3f}, "
-           f"charge={pyo.value(model.charge[t]):.3f}, "
-           f"discharge={pyo.value(model.discharge[t]):.3f}, "
-           f"curtailment={pyo.value(model.curtailment[t]):.3f}, "
-           f"soc={pyo.value(model.soc[t]):.3f}"
-       )
-
-   print(f"Final SOC: {pyo.value(model.soc[len(test_load)]):.3f}")
-   print("\nArray Shapes")
-   print("-" * 40)
-   print("Dispatch results shape:", dispatch_results.grid_import.shape)
-   print("SciPy results shape:", scipy_grid.shape)
-   print("Charge shape:", dispatch_results.charge.shape)
-
-   print("\nPyomo vs SciPy comparison")
-   print("-" * 40)
-
-   print(
-       "Grid max difference:",
-       np.max(np.abs(dispatch_results.grid_import - scipy_grid)),
-
-   )
-   print(
-         "Curtailment max difference:",
-         np.max(np.abs(dispatch_results.curtailment - scipy_curtailment)),
-    )
-   print(
-         "SOC max difference:",
-        np.max(
-            np.abs(
-                dispatch_results.soc
-                -scipy_soc
-            )))       
-
-        
-        
-   
-
 
