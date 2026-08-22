@@ -9,6 +9,11 @@ from optimization import (
     extract_dispatch_results,
     validate_dispatch_result,
 )
+from risk import (
+    summarize_cost_distribution,
+    calculate_exceedance_probability,
+)
+
 from dataclasses import dataclass
 
 @dataclass
@@ -20,8 +25,6 @@ class MonteCarloResult:
     failed_scenarios: int
     runtime_seconds: float
     average_runtime_per_scenario: float
-
-start_time = time.perf_counter()
 
 def generate_scenarios(
         load: np.ndarray,
@@ -181,6 +184,7 @@ def run_monte_carlo(
         price_shift_variability=price_shift_variability,
         random_seed=random_seed,
     )
+    start_time = time.perf_counter()
     scenario_records = []
 
     for scenario_id in range(num_scenarios):
@@ -283,10 +287,6 @@ def run_monte_carlo(
                 "battery_throughput": np.nan,
                 "peak_grid_import": np.nan,
                 "error": str(exc),
-                "solver_status": 
-                result.solver_status,
-                "termination_condition":
-                result.termination_condition,
                 "solver_status": None,
                 "termination_condition": None,
             })
@@ -374,5 +374,35 @@ if __name__ == "__main__":
         "seconds/scenario"
     )
 
+    risk_summary = summarize_cost_distribution(
+    result.scenarios,
+    confidence_level=0.95,
+    )
 
-        
+    print("\nRisk Summary")
+    print("-" * 40)
+    print("Expected cost:", risk_summary["expected_cost"])
+    print("Standard deviation:", risk_summary["cost_standard_deviation"])
+    print("P5:", risk_summary["p5"])
+    print("P50:", risk_summary["p50"])
+    print("P95:", risk_summary["p95"])
+    print("VaR 95:", risk_summary["value_at_risk"])
+    print(
+        "CVaR 95:",
+        risk_summary["conditional_value_at_risk"],
+    )
+    threshold = risk_summary["p95"]
+
+    exceedance = calculate_exceedance_probability(
+        result.scenarios,
+        metric="objective_cost",
+        threshold=threshold,
+    )
+
+    print(
+        "Probability cost exceeds P95:",
+        exceedance,
+    )
+
+
+            
