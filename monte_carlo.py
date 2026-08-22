@@ -18,6 +18,10 @@ class MonteCarloResult:
     number_of_scenarios: int
     successful_scenarios: int
     failed_scenarios: int
+    runtime_seconds: float
+    average_runtime_per_scenario: float
+
+start_time = time.perf_counter()
 
 def generate_scenarios(
         load: np.ndarray,
@@ -53,60 +57,87 @@ def generate_scenarios(
         raise ValueError(
             "num_scenarios must be greater than zero."
         )
-    solar_scale = rng.lognormal(
-    mean=-0.5 * solar_variability ** 2,
-    sigma=solar_variability,
-    size=num_scenarios,
+    if solar_variability < 0:
+        raise ValueError(
+        "solar_variability cannot be negative."
     )
+    if load_variability < 0:
+        raise ValueError(
+            "load_variability cannot be negative."
+        )
+
+    if price_variability < 0:
+        raise ValueError(
+            "price_variability cannot be negative."
+        )
+
+    if price_shift_variability < 0:
+
+        raise ValueError(
+            "price_shift_variability cannot be negative."
+        )
+    if np.any(load < 0):
+        raise ValueError(
+        "Load cannot contain negative values."
+    )
+
+    if np.any(solar < 0):
+        raise ValueError(
+        "Solar cannot contain negative values."
+    )
+    solar_scale = rng.lognormal(
+        mean=-0.5 * solar_variability ** 2,
+        sigma=solar_variability,
+        size=num_scenarios,
+        )
 
 
     load_scale = np.clip(
-        rng.normal(
-            1.0,
-            load_variability,
-            size=num_scenarios,
-        ),
-        0.1,
-        None,
-    )
+            rng.normal(
+                1.0,
+                load_variability,
+                size=num_scenarios,
+            ),
+            0.1,
+            None,
+        )
 
     price_scale = rng.lognormal(
-        mean=-0.5 * price_variability ** 2,
-        sigma=price_variability,
-        size=num_scenarios,
-    )
+            mean=-0.5 * price_variability ** 2,
+            sigma=price_variability,
+            size=num_scenarios,
+        )
 
     price_shift = rng.normal(
-        0.0,
-        price_shift_variability,
-        size=num_scenarios,
-    )
+            0.0,
+            price_shift_variability,
+            size=num_scenarios,
+        )
     scenario_load = (
-    load[None, :]
-    * load_scale[:, None]
-    )
+        load[None, :]
+        * load_scale[:, None]
+        )
 
     scenario_solar = (
-        solar[None, :]
-        * solar_scale[:, None]
-    )
+            solar[None, :]
+            * solar_scale[:, None]
+        )
 
     scenario_price = (
-        hourly_price[None, :]
-        * price_scale[:, None]
-        + price_shift[:, None]
-    )
+            hourly_price[None, :]
+            * price_scale[:, None]
+            + price_shift[:, None]
+        )
     return (
-        scenario_load,
-        scenario_solar,
-        scenario_price,
-        load_scale,
-        solar_scale,
-        price_scale,
-        price_shift)
+            scenario_load,
+            scenario_solar,
+            scenario_price,
+            load_scale,
+            solar_scale,
+            price_scale,
+            price_shift)
+
   
-
-
 def run_monte_carlo(
     load: np.ndarray,
     solar: np.ndarray,
@@ -229,7 +260,10 @@ def run_monte_carlo(
                 "peak_grid_import":
                     peak_grid_import,
             })
-        except Exception as exc:
+        except (
+            RuntimeError,
+            ValueError,
+            AssertionError) as exc:
             scenario_records.append({
                 "scenario_id": scenario_id,
                 "solve_success": False,
@@ -249,6 +283,12 @@ def run_monte_carlo(
                 "battery_throughput": np.nan,
                 "peak_grid_import": np.nan,
                 "error": str(exc),
+                "solver_status": 
+                result.solver_status,
+                "termination_condition":
+                result.termination_condition,
+                "solver_status": None,
+                "termination_condition": None,
             })
     scenario_table = pd.DataFrame(
         scenario_records
@@ -262,7 +302,14 @@ def run_monte_carlo(
         num_scenarios
         - successful_scenarios
     )
+    runtime_seconds = (
+        time.perf_counter() - start_time
+    )
 
+    average_runtime_per_scenario = (
+    runtime_seconds / num_scenarios 
+    )
+    
     return MonteCarloResult(
         scenarios=scenario_table,
         random_seed=random_seed,
@@ -273,6 +320,9 @@ def run_monte_carlo(
         failed_scenarios=(
             failed_scenarios
         ),
+        runtime_seconds=runtime_seconds,
+        average_runtime_per_scenario=
+        average_runtime_per_scenario,
     )
 if __name__ == "__main__": 
     start_time = time.perf_counter()
@@ -307,7 +357,7 @@ if __name__ == "__main__":
         battery_charge_efficiency=0.95,
         battery_discharge_efficiency=0.95,
         degradation_rate=1e-9,
-        num_scenarios=25,
+        num_scenarios=500,
         random_seed=42,
     )
     elapsed_time = time.perf_counter() - start_time
@@ -315,10 +365,13 @@ if __name__ == "__main__":
     print(result.scenarios)
     print("Successful:", result.successful_scenarios)
     print("Failed:", result.failed_scenarios)
-    print(f"Runtime: {elapsed_time: 3f} seconds")
     print(
-        f"Average solve time:  "
-        f" {elapsed_time / result.number_of_scenarios: 4f} seconds/scenario"
+        f"Runtime: {result.runtime_seconds:.3f} seconds"
+    )
+    print(
+        "Average solve time: "
+        f"{result.average_runtime_per_scenario:.4f} "
+        "seconds/scenario"
     )
 
 

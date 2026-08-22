@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from monte_carlo import (
     generate_scenarios,
@@ -72,3 +73,55 @@ def test_monte_carlo_is_reproducible():
         first.scenarios,
         second.scenarios,
     )
+
+def test_monte_carlo_small_batch_all_succeeds():
+    result = run_monte_carlo(
+        load=np.array([
+            10.0, 10.0, 10.0, 10.0
+        ]),
+        solar=np.array([
+            0.0, 15.0, 15.0, 0.0
+        ]),
+        hourly_price=np.array([
+            0.10, 0.15, 0.50, 0.50
+        ]),
+        battery_capacity=10.0,
+        battery_power=5.0,
+        num_scenarios=10,
+        random_seed=42,
+    )
+
+    assert result.successful_scenarios == 10
+    assert result.failed_scenarios == 0
+    assert result.scenarios["solve_success"].all()
+
+def test_uncertainty_changes_cost_outcomes():
+    result = run_monte_carlo(
+        load=np.array([
+            10.0, 10.0, 10.0, 10.0
+        ]),
+        solar=np.array([
+            0.0, 15.0, 15.0, 0.0
+        ]),
+        hourly_price=np.array([
+            0.10, 0.15, 0.50, 0.50
+        ]),
+        battery_capacity=10.0,
+        battery_power=5.0,
+        num_scenarios=20,
+        random_seed=42,
+    )
+
+    assert (
+        result.scenarios["objective_cost"].std()
+        > 0.0
+    )
+
+def test_negative_variability_is_rejected():
+    with pytest.raises(ValueError):
+        generate_scenarios(
+            load=np.array([10.0]),
+            solar=np.array([5.0]),
+            hourly_price=np.array([0.20]),
+            solar_variability=-0.10,
+        )
