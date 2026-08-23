@@ -699,7 +699,7 @@ def build_capacity_model(
         expr=model.soc[number_of_hours]
         == model.soc[0]
     )
-
+    # Objective
     def objective_rule(model):
         capital_cost = (
             model.annualized_solar_capacity_cost
@@ -730,11 +730,11 @@ def build_capacity_model(
             + grid_cost
             + degradation_cost
         )
-        model.objective = pyo.Objective(
-        rule=objective_rule,
-        sense=pyo.minimize,
+    model.objective = pyo.Objective(
+    rule=objective_rule,
+    sense=pyo.minimize,
     )
-        return model
+    return model
 
 def solve_dispatch(
         model: pyo.ConcreteModel,
