@@ -106,8 +106,8 @@ def summarize_cost_distribution(
 def calculate_exceedance_probability(
         scenarios: pd.DataFrame,
         metric: str,
-        threshold: float,
-) -> float:
+        threshold: float,   
+    ) -> float:
     values = extract_successful_metric(
         scenarios,
         metric,
