@@ -1,16 +1,19 @@
 from pathlib import Path
 
 
-# ============================
+# 
 # DATA PROFILE ASSUMPTIONS
-# ============================
+# 
 
 project_dir = Path(__file__).parent
 system_scale = 1e-5
 
-# Germany/Austria remains the default scenario, but it is now just a scenario.
-# To test another building, market, tariff, or weather file, change this mapping
-# instead of changing the simulation, optimization, or reporting engines.
+# Germany/Austria remains the default 
+# scenario, but it is now just a scenario.
+# To test another building, market, 
+# tariff, or weather file, change this mapping
+# instead of changing the simulation, 
+# optimization, or reporting engines.
 data_profile_config = {
     "name": "European sample profile",
     "csv_path": project_dir / "data" / "europe_data.csv",
@@ -27,39 +30,57 @@ data_profile_config = {
 }
 
 
-# ============================
+# 
 # DESIGN ASSUMPTIONS
-# ============================
+# 
 
-# Battery power is modeled as a fraction of battery energy capacity.
-# Example: 0.25 means the battery can charge or discharge 25% of its capacity
-# per hour, which is equivalent to a four-hour battery.
+# Legacy design-search assumptions:
+# simulation.py and the original grid-search 
+# workflow represent battery
+# power as a fixed fraction 
+# of battery energy capacity.
 #
-# This assumption should be used consistently in both:
-# - perfect-foresight deterministic dispatch in optimization.py
-# - threshold-style Monte Carlo dispatch in monte_carlo.py
-battery_power_ratio = 0.25
+# The current deterministic capacity 
+# and stochastic optimization models
+# DO NOT use this assumption. 
+# They optimize battery energy capacity and
+# battery power capacity independently.
+legacy_battery_power_ratio = 0.25
 
-### I should eventually test a wider range of storage durations and solar
-### penetrations, but these are the ones that have been used in prior work.
-storage_durations_hours = [0, 0.25, 0.5, 1.0, 2.0]
-solar_penetrations = [0.05, 0.10, 0.15, 0.20, 0.25]
 
-### These need to be documented and justified. They are not based on any
+# Legacy design-search assumptions:
+# these are retained for comparison with 
+# prior results, but they are not used in the 
+# current optimization models.
+legacy_storage_durations_hours = [
+    0, 0.25, 0.5, 1.0, 2.0]
+legacy_solar_penetrations = [0.05, 0.10, 0.15, 0.20, 0.25]
+
+### These need to be documented and justified. 
+# They are not based on any
 ### particular market or technology assumptions.
 battery_cost_per_kwh = 300
 battery_lifetime_years = 10
 
-# Financial assumption used to annualize capital costs with a capital recovery
-# factor instead of simple cost / lifetime division.
+# Financial assumption used to annualize 
+# capital costs with a capital recovery
+# factor instead of 
+# simple cost / lifetime division.
 #
-# This is a first-pass project finance assumption, not a market-specific WACC.
-# Changing this number can materially change the optimal design because it
-# changes how expensive long-lived assets look on an annual basis.
+# This is a first-pass project 
+# finance assumption, not a 
+# market-specific WACC.
+# Changing this number can 
+# materially change the 
+# optimal design because it
+# changes how expensive long-lived 
+# assets look on an annual basis.
 discount_rate = 0.05
 
-# This preserves the prior cost scale. The annualized solar cost per penetration
-# is derived after the active profile is loaded because reference penetration is
+# This preserves the prior cost scale. 
+# The annualized solar cost per penetration
+# is derived after the active profile is 
+# loaded because reference penetration is
 # profile-specific.
 solar_cost_reference = 8000
 solar_lifetime_years = 20
@@ -70,11 +91,16 @@ solar_lifetime_years = 20
 #
 # Current planned interpretation:
 # - charge efficiency applies when energy enters the battery
-# - discharge efficiency applies when stored energy serves load or offsets grid
-# - round-trip efficiency is approximately charge_efficiency * discharge_efficiency
+# - discharge efficiency applies when 
+# stored energy serves load or offsets grid
+# - round-trip efficiency is 
+# approx charge_efficiency * discharge_efficiency
 #
-# These assumptions are wired into the deterministic optimization engine.
-# The next refactor step should wire them into monte_carlo.py as well.
+# Charge and discharge efficiencies are 
+# used consistently by the
+# deterministic dispatch, 
+# Monte Carlo dispatch, capacity co-optimization,
+# and stochastic optimization models.
 battery_charge_efficiency = 0.95
 battery_discharge_efficiency = 0.95
 battery_round_trip_efficiency = (
@@ -82,9 +108,9 @@ battery_round_trip_efficiency = (
 )
 
 
-# ============================
+# 
 # MONTE CARLO ASSUMPTIONS
-# ============================
+# 
 
 num_monte_carlo_scenarios = 1000
 monte_carlo_seed = 42
@@ -94,24 +120,67 @@ load_variability = 0.08
 price_variability = 0.25
 price_shift_variability = 0.01
 
-# Dispatch-method documentation:
-#
+# 
+# OPTIMIZATION ASSUMPTIONS
+# 
+
 # Deterministic dispatch:
-# - optimization.py uses a perfect-foresight linear program.
-# - It assumes the model knows the full price, load, and solar profile for the
-#   analysis year before dispatch decisions are made.
-# - This is useful as a planning benchmark because it estimates the best
-#   possible dispatch under the selected assumptions.
-#
+# - optimization.py uses a perfect-foresight 
+# linear program.
+# - Load, solar availability, and 
+# electricity prices are known over the
+#   optimization horizon.
+# - This provides a deterministic 
+# planning benchmark.
+
 # Monte Carlo dispatch:
-# - monte_carlo.py currently uses a faster threshold-based dispatch rule.
-# - It does not solve a full optimization problem for every scenario.
-# - This is useful for scenario screening, but it should be interpreted as a
-#   heuristic operating policy rather than the theoretical optimum.
+# - monte_carlo.py perturbs load, solar, 
+# and price using seeded uncertainty.
+# - Every scenario is independently 
+# re-optimized using the Pyomo dispatch
+#   model in optimization.py.
+# - Monte Carlo therefore measures 
+# the distribution of optimized operating
+#   outcomes for a fixed infrastructure design.
+
+# Capacity co-optimization:
+# - optimization.py can jointly 
+# optimize continuous solar capacity,
+#   battery energy capacity, battery 
+# power capacity, and dispatch.
+# - Capital costs are annualized 
+# using a capital recovery factor.
+# - Short representative operating 
+# horizons are annualized using the
+#   model's operating-cost scaling convention.
+
+# Two-stage stochastic optimization:
+# - stochastic.py chooses shared 
+# first-stage solar and battery capacities.
+# - Dispatch decisions are 
+# scenario-specific second-stage decisions.
+# - Scenario operating costs are 
+# probability weighted.
+# - Optional CVaR risk aversion 
+# penalizes high-cost tail outcomes.
+
 #
-# The Monte Carlo dispatch uses battery_power_ratio to enforce max charge,
-# max discharge, and max grid-charge limits. It also uses the battery efficiency
-# assumptions above to track charge/discharge losses in state of charge.
+# Stochastic optimization 
+#
+# Default confidence level for CVaR risk aversion.
+cvar_confidence_level = 0.95
+
+# Risk-neutral optimization uses zero 
+# risk aversion.
+# Postive values place increasing weight 
+# on high-cost tail outcomes.
+default_risk_aversion = 0.0
+
+# Values used when constructing a 
+# risk-averse stochastic optimization model for testing.
+risk_aversion_values = [
+    0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 1.0]
+
 
 uncertainty_experiments = [
     (
@@ -150,9 +219,14 @@ uncertainty_experiments = [
 ]
 
 
-# ============================
+# 
 # ANALYSIS AND PLOT ASSUMPTIONS
-# ============================
-
+#
+# Legacy reporting/design-search setting.
+# Current capacity optimization 
+# chooses solar capacity directly.
 design_comparison_scenarios = 100
-analysis_solar_penetration = 0.15
+legacy_analysis_solar_penetration = 0.15
+
+# future task is still assumption sourcing 
+# and documentation.

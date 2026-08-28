@@ -6,25 +6,34 @@ import numpy as np
 import pandas as pd
 
 
+
+
 @dataclass
 class EnergyDataProfile:
     """Generic hourly energy profile used by the optimization engines.
 
     This class is the data adapter layer for the model. A source can be a
-    national dataset, building meter export, tariff CSV, synthetic profile, or
-    direct arrays. Once loaded, the rest of the platform receives the same
-    fields every time:
+    national dataset, building meter export, tariff CSV, synthetic profile,
+    or direct arrays.
 
+    Core fields:
     - load_kwh
     - solar_kwh
     - price_per_kwh
+    - solar_capacity_factor
     - timestamps
+
+    solar_kwh represents an already-scaled hourly solar generation profile.
+
+    solar_capacity_factor represents hourly solar availability per unit of
+    installed solar capacity and is used by capacity co-optimization models.
     """
 
     name: str
     load_kwh: np.ndarray
     solar_kwh: np.ndarray
     price_per_kwh: np.ndarray
+    solar_capacity_factor: Optional[np.ndarray] = None
     timestamps: Optional[pd.Series] = None
     source: str = ""
     analysis_period: str = ""
@@ -125,6 +134,7 @@ class EnergyDataProfile:
             load_kwh,
             price_per_kwh,
             solar_kwh=None,
+            solar_capacity_factor=None,
             timestamps=None,
             source="manual arrays",
             analysis_period="custom"):
@@ -137,12 +147,21 @@ class EnergyDataProfile:
             load_kwh=np.asarray(load_kwh, dtype=float),
             solar_kwh=np.asarray(solar_kwh, dtype=float),
             price_per_kwh=np.asarray(price_per_kwh, dtype=float),
+            solar_capacity_factor=(
+                None
+                if solar_capacity_factor is None
+                else np.asarray(
+                    solar_capacity_factor, 
+                    dtype=float
+                    )
+            ),
             timestamps=timestamps,
             source=source,
             analysis_period=analysis_period,
         )
         profile.validate()
         return profile
+
 
     def validate(self):
         profile_lengths = {
@@ -163,6 +182,32 @@ class EnergyDataProfile:
             raise ValueError("price profile contains missing or non-finite values")
         if np.sum(self.load_kwh) <= 0:
             raise ValueError("annual load must be greater than zero")
+        if self.solar_capacity_factor is not None:
+            if len(self.solar_capacity_factor) != len(
+                self.load_kwh
+            ):
+                raise ValueError(
+                    "solar_capacity_factor must have the "
+                    "same length as the energy profile"
+                )
+
+            if not np.all(
+                np.isfinite(self.solar_capacity_factor)
+            ):
+                raise ValueError(
+                    "solar_capacity_factor contains "
+                    "missing or non-finite values"
+                )
+
+            if np.any(self.solar_capacity_factor < 0):
+                raise ValueError(
+                    "solar_capacity_factor cannot be negative"
+                )
+
+            if np.any(self.solar_capacity_factor > 1):
+                raise ValueError(
+                    "solar_capacity_factor cannot exceed 1"
+                )
 
     @property
     def annual_load(self):

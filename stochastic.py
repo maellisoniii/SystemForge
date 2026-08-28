@@ -1,6 +1,7 @@
 import numpy as np
 import pyomo.environ as pyo
-from optimization import capital_recovery_factor
+from optimization import capital_recovery_factor, solve_dispatch
+
 
 def build_two_stage_model(
     scenario_load: np.ndarray,
@@ -460,10 +461,9 @@ def build_two_stage_model(
         )
     )
 )
-    # Objective: first stage capacity cost
-    # and probability-weighted second stage operating cost
-    def objective_rule(model):
-        capital_cost = (
+    # Capital and expected operating cost
+    model.capital_cost = pyo.Expression(
+        expr=(
             model.annualized_solar_capacity_cost 
             * model.solar_capacity
             + model.annualized_battery_energy_cost
@@ -471,14 +471,23 @@ def build_two_stage_model(
             + model.annualized_battery_power_cost
             * model.battery_power
         )
-        expected_operating_cost = sum(
+    )
+    model.expected_operating_cost = pyo.Expression(
+        expr=(
+            sum(
         model.scenario_probability[s]
         * model.scenario_operating_cost[s]
         for s in model.S
+        )
     )
+    )
+    # Objective: first stage capacity cost
+    # and probability-weighted second stage operating cost
+    def objective_rule(model):
+    
         return (
-                capital_cost 
-                + expected_operating_cost
+                model.capital_cost
+                + model.expected_operating_cost
                 + risk_aversion
                 * model.cvar
             )
@@ -557,3 +566,5 @@ if __name__ == "__main__":
                 f"discharge={pyo.value(model.discharge[s, t]):.3f} | "
                 f"soc={pyo.value(model.soc[s, t]):.3f}"
             )
+
+
