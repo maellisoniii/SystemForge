@@ -1,7 +1,123 @@
 import matplotlib.pyplot as plt
 import numpy as np
+"""
+Plotting utilities for SystemForge.
 
+Current plots support Monte Carlo 
+uncertainty analysis and
+risk-aware stochastic capacity optimization.
 
+Legacy plots based on solar penetration 
+and storage duration are
+retained for historical design-search 
+comparisons.
+"""
+def plot_risk_aversion_frontier(results):
+    """
+    Plot expected total cost against optimized 
+    CVaR
+    across stochastic risk-aversion settings.
+    """
+
+    expected_total_cost = (
+        results["capital_cost"]
+        + results["expected_operating_cost"]
+    )
+    plt.figure(figsize=(9, 6))
+
+    plt.plot(
+        results["cvar"],
+        expected_total_cost,
+        marker="o",)
+    
+    for _, row in results.iterrows():
+        plt.annotate(
+            f"λ={row['risk_aversion']:g}",
+            (
+                row["cvar"],
+                row["capital_cost"]
+                + row["expected_operating_cost"],
+            ),
+        )
+    plt.title(
+        "Expected System Cost vs Tail Risk")
+    plt.xlabel("CVaR")
+    plt.ylabel("Expected Total Cost")
+    plt.grid(True)
+    plt.show()
+
+def plot_capacity_vs_risk_aversion(results):
+    """
+    Show how optimized infrastructure changes
+    as risk aversion increases.
+    """
+
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(
+        results["risk_aversion"],
+        results["solar_capacity"],
+        marker="o",
+        label="Solar Capacity",
+    )
+    plt.plot(
+        results["risk_aversion"],
+        results["battery_capacity"],
+        marker="o",
+        label="Battery Energy Capacity",
+    )
+    plt.plot(
+        results["risk_aversion"],
+        results["battery_power"],
+        marker="o",
+        label="Battery Power Capacity",)
+    plt.title(
+        "Optimized Capacity vs Risk Aversion")
+    
+    plt.xlabel("Risk Aversion λ")
+    plt.ylabel("Optimized Capacity")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+def plot_stochastic_cost_components(results):
+    """
+    Compare capital cost, expected operating cost,
+    and CVaR across stochastic designs.
+    """
+    plt.figure(figsize=(10, 6))
+    plt.plot(
+        results["risk_aversion"],
+        results["capital_cost"],
+        marker="o",
+        label="Capital Cost",
+    )
+    plt.plot(
+        results["risk_aversion"],
+        results["expected_operating_cost"],
+        marker="o",
+        label="Expected Operating Cost",
+    )
+    plt.plot(
+        results["risk_aversion"],
+        results["cvar"],
+        marker="o",
+        label="CVaR",)
+    
+    plt.title(
+        "Cost and Risk Components vs Risk " \
+        "Aversion")
+    
+    plt.xlabel("Risk Aversion λ")
+    plt.ylabel("Cost")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+# 
+# LEGACY DESIGN-SEARCH PLOTS
+#
+# The plots below were built around the original
+# solar-penetration / storage-duration workflow.
 def plot_uncertainty_source_table(uncertainty_table):
     table_for_display = uncertainty_table.copy()
     table_for_display["Cost Standard Deviation (EUR)"] = (
@@ -11,7 +127,8 @@ def plot_uncertainty_source_table(uncertainty_table):
 
     figure, axis = plt.subplots(figsize=(11, 2.5))
     axis.axis("off")
-    axis.set_title("Monte Carlo Uncertainty Source Comparison", fontsize=14, pad=14)
+    axis.set_title("Monte Carlo Uncertainty " \
+    "Source Comparison", fontsize=14, pad=14)
 
     comparison_table = axis.table(
         cellText=table_for_display.values,

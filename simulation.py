@@ -1,12 +1,23 @@
 import numpy as np
 
-from SystemForge.optimization import optimize_battery_dispatch
+from SystemForge.optimization import optimize_battery_dispatch_scipy
+"""
+Legacy deterministic design-search simulator.
+
+This module preserves the original SystemForge workflow in which solar
+penetration and storage duration are externally specified design choices.
+
+It is retained for historical comparison and deterministic benchmarking.
+
+Current SystemForge capacity-planning workflows use optimization.py and
+stochastic.py, where solar capacity, battery energy capacity, and battery
+power capacity are optimized directly.
+"""
 
 
 def solar_scale_from_penetration(profile, solar_penetration):
     """Scale the recorded solar profile to the requested annual penetration."""
     return solar_penetration / profile.reference_solar_penetration
-
 
 def battery_capacity_from_duration(profile, storage_duration_hours):
     """Convert storage duration to capacity using average hourly load."""
@@ -14,7 +25,7 @@ def battery_capacity_from_duration(profile, storage_duration_hours):
 
 
 class SystemSimulator:
-    """Runs deterministic simulations for one standardized energy profile."""
+    """[Legacy]Runs deterministic simulations for one standardized energy profile."""
 
     def __init__(
             self,
@@ -57,7 +68,7 @@ class SystemSimulator:
         if not return_hourly_data and cache_key in self.simulation_cache:
             return self.simulation_cache[cache_key]
 
-        grid_import, solar_curtailed, battery_soc = optimize_battery_dispatch(
+        grid_import, solar_curtailed, battery_soc = optimize_battery_dispatch_scipy(
             load,
             hourly_price,
             battery_capacity,

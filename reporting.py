@@ -1,3 +1,147 @@
+import pyomo.environ as pyo
+"""
+Reporting utilities for SystemForge results.
+
+Current reporting supports 
+deterministic capacity optimization,
+Monte Carlo uncertainty analysis, 
+and risk-aware stochastic optimization.
+
+Legacy reporting functions for 
+solar-penetration and storage-duration
+grid-search workflows are retained for 
+historical comparison.
+"""
+def print_capacity_result(result):
+    """Print the solution from deterministic 
+    capacity co-optimization."""
+
+    print("\nDeterministic Capacity Optimization")
+    print("-----------------------------------")
+    print(
+        "Solar Capacity:",
+        round(result.solar_capacity, 3),
+    )
+    print(
+        "Battery Energy Capacity:",
+        round(result.battery_capacity, 3),
+    )
+    print(
+        "Battery Power Capacity:",
+        round(result.battery_power, 3),
+    )
+    print(
+        "Annualized Capital Cost:",
+        round(result.capital_cost, 2),
+    )
+    print(
+        "Grid Cost:",
+        round(result.grid_cost, 2),
+    )
+    print(
+        "Battery Degradation Cost:",
+        round(result.degradation_cost, 2),
+    )
+    print(
+        "Total Objective Cost:",
+        round(result.objective_cost, 2),
+    )
+    print(
+        "Solver Status:",
+        result.solver_status,
+    )
+    print(
+        "Termination Condition:",
+        result.termination_condition,
+    )
+def print_stochastic_summary(
+        model,
+        risk_aversion,
+        confidence_level):
+    """Print the main design and risk outputs from a stochastic solve."""
+
+    import pyomo.environ as pyo
+
+    print("\nStochastic Capacity Optimization")
+    print("--------------------------------")
+
+    print(
+        "Risk Aversion:",
+        risk_aversion,
+    )
+    print(
+        "CVaR Confidence Level:",
+        f"{confidence_level:.1%}",
+    )
+    print(
+        "Solar Capacity:",
+        round(
+            pyo.value(model.solar_capacity),
+            3,
+        ),
+    )
+    print(
+        "Battery Energy Capacity:",
+        round(
+            pyo.value(model.battery_capacity),
+            3,
+        ),
+    )
+    print(
+        "Battery Power Capacity:",
+        round(
+            pyo.value(model.battery_power),
+            3,
+        ),
+    )
+    print(
+        "Annualized Capital Cost:",
+        round(
+            pyo.value(model.capital_cost),
+            2,
+        ),
+    )
+    print(
+        "Expected Operating Cost:",
+        round(
+            pyo.value(model.expected_operating_cost),
+            2,
+        ),
+    )
+    if risk_aversion > 0:
+        print(
+            "CVaR:",
+            round(
+                pyo.value(model.cvar),
+                2,
+            ),
+        )
+    print(
+        "Risk-Adjusted Objective:",
+        round(
+            pyo.value(model.objective),
+            2,
+        ),
+    )
+    expected_total_cost = (
+    pyo.value(model.capital_cost)
+    + pyo.value(model.expected_operating_cost) 
+    )
+    print(
+    "Expected Total Cost:",
+    round(expected_total_cost, 2),
+    )
+# 
+# LEGACY REPORTING
+# 
+# The functions below report results 
+# from the original SystemForge
+# solar-penetration / storage-duration 
+# grid-search workflow.
+
+# Current capacity-planning results 
+# should use the reporting functions
+# defined above.
 def print_best_design(profile, best_design):
     print(f"\nBest System Design ({profile.name}, {profile.analysis_period})")
     print("------------------")

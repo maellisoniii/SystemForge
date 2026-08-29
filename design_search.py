@@ -1,9 +1,21 @@
 import numpy as np
 import pandas as pd
 
-from SystemForge.monte_carlo import run_monte_carlo
-from SystemForge.risk import calculate_cost_risk_metrics
+from monte_carlo import run_monte_carlo
+from risk import calculate_cost_risk_metrics
+"""
+Legacy SystemForge grid-search analysis.
 
+This module preserves the original design-search workflow based on
+externally specified solar penetration and storage duration.
+
+It is retained for historical comparison, sensitivity analysis, and
+benchmarking against earlier SystemForge results.
+
+Current capacity-planning workflows use optimization.py and stochastic.py,
+where solar capacity, battery energy capacity, battery power capacity,
+and dispatch are optimized directly.
+"""
 
 def capital_recovery_factor(discount_rate, asset_lifetime_years):
     """Convert an upfront capital cost into an equivalent annual cost.
@@ -216,7 +228,9 @@ def build_cost_map(
 
     return cost_map
 
-
+# Legacy uncertainty workflow.
+# This function reflects the original SystemForge Monte Carlo interface
+# and is not part of the current optimized-scenario architecture.
 def build_design_uncertainty_comparison(
         profile,
         simulator,
